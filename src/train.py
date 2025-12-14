@@ -391,13 +391,17 @@ def evaluate_model(model, dataloader, device, diacritic2id, model_name="bilstm_c
 
             predictions = model(X_batch, mask=mask_batch)
 
-            # predictions is a list of lists (one per sequence in batch)
-            # y_batch is tensor, mask_batch is tensor
-            # Move predictions to CPU if they're tensors
-            if isinstance(predictions, list) and len(predictions) > 0:
-                # CRF returns list of lists (already on CPU)
-                pass
+            # Handle different prediction formats:
+            # - CRF models return: list of lists (already on CPU)
+            # - Dual-pathway models return: tensor logits (on GPU, need to convert)
+            if isinstance(predictions, torch.Tensor):
+                # Dual-pathway models: convert logits to predictions (argmax)
+                # predictions shape: (batch, seq_len, num_classes)
+                predictions = predictions.argmax(dim=-1)  # (batch, seq_len)
+                # Convert to list of lists for compatibility
+                predictions = [seq.cpu().numpy().tolist() for seq in predictions]
             
+            # Now predictions is always a list of lists
             for pred_seq, target_seq, mask_seq in zip(predictions, y_batch, mask_batch):
                 pred_flat = []
                 target_flat = []
@@ -405,13 +409,11 @@ def evaluate_model(model, dataloader, device, diacritic2id, model_name="bilstm_c
 
                 for p, t, m in zip(pred_seq, target_seq, mask_seq):
                     if m:
-                        # Convert p to int if it's a tensor (on CPU or GPU)
-                        if isinstance(p, torch.Tensor):
-                            p = int(p.cpu().item())
-                        else:
-                            p = int(p)
+                        # Convert to int (should already be int from list, but be safe)
+                        p = int(p)
+                        t = int(t.item() if isinstance(t, torch.Tensor) else t)
                         pred_flat.append(p)
-                        target_flat.append(t.item() if isinstance(t, torch.Tensor) else int(t))
+                        target_flat.append(t)
                         mask_flat.append(True)
 
                 if pred_flat:
