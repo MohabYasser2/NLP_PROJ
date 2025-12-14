@@ -19,15 +19,16 @@ import torch.nn as nn
 
 class BiLSTMDualPathway(nn.Module):
     """
-    Dual-pathway BiLSTM model for Arabic diacritization.
+    Dual-pathway BiLSTM model for Arabic diacritization with word-level AraBERT.
     
     Architecture:
     - Character-level BiLSTM: processes learned character embeddings (128-dim)
-    - Word-level BiLSTM: processes AraBERT embeddings (768-dim)
-    - Concatenation: combines both pathways
+    - Word-level BiLSTM: processes AraBERT embeddings (768-dim) at WORD level
+    - Expansion: word pathway output expanded to character level (like original design)
+    - Concatenation: combines both pathways at character level
     - Classifier: outputs diacritic labels
     
-    This matches the original 2bilstm_classifier.py but with AraBERT for words.
+    Matches the original 2bilstm_classifier.py design but uses AraBERT for words.
     """
     
     def __init__(
@@ -77,7 +78,7 @@ class BiLSTMDualPathway(nn.Module):
         )
         
         # Word-level BiLSTM pathway
-        # Input: AraBERT embeddings (768-dim)
+        # Input: AraBERT embeddings (768-dim) at WORD level
         self.word_bilstm = nn.LSTM(
             input_size=embedding_dim,  # AraBERT: 768-dim
             hidden_size=word_hidden_dim,
@@ -88,9 +89,9 @@ class BiLSTMDualPathway(nn.Module):
         )
         
         # Combine both pathways
-        char_out_dim = char_hidden_dim * 2  # 512
-        word_out_dim = word_hidden_dim * 2  # 512
-        combined_dim = char_out_dim + word_out_dim  # 1024
+        self.char_out_dim = char_hidden_dim * 2  # 512
+        self.word_out_dim = word_hidden_dim * 2  # 512
+        combined_dim = self.char_out_dim + self.word_out_dim  # 1024
         
         # Classifier head (from original)
         self.classifier = nn.Sequential(
@@ -100,28 +101,82 @@ class BiLSTMDualPathway(nn.Module):
             nn.Linear(combined_dim // 2, tagset_size)  # 512 -> 15
         )
     
-    def forward(self, char_ids, word_embeddings, mask=None):
+    def forward(self, X, tags=None, mask=None):
         """
         Forward pass
         
         Args:
-            char_ids: Character IDs (batch, seq_len) - for learned embeddings
-            word_embeddings: AraBERT embeddings (batch, seq_len, 768)
+            X: Tuple of (char_ids, word_embeddings, word_boundaries)
+               char_ids: Character IDs (batch, seq_len) - for learned embeddings
+               word_embeddings: List of AraBERT embeddings [(num_words_0, 768), ...]
+               word_boundaries: List of word boundaries per sample
+            tags: Not used (for compatibility with train.py)
             mask: Optional mask tensor for padding
         
         Returns:
             logits: Output logits of shape (batch_size, seq_len, tagset_size)
         """
         
-        # Character-level pathway: embed char IDs and process
+        # Handle tuple input
+        if isinstance(X, (tuple, list)) and len(X) == 3:
+            char_ids, word_embeddings, word_boundaries = X
+        else:
+            raise ValueError("X must be a tuple of (char_ids, word_embeddings, word_boundaries)")
+        
+        batch_size = char_ids.size(0)
+        char_seq_len = char_ids.size(1)
+        
+        # CHARACTER PATHWAY: embed char IDs and process
         char_emb = self.char_embedding(char_ids)  # (batch, seq_len, 128)
         char_out, _ = self.char_bilstm(char_emb)  # (batch, seq_len, 512)
         
-        # Word-level pathway: process AraBERT embeddings
-        word_out, _ = self.word_bilstm(word_embeddings)  # (batch, seq_len, 512)
+        # WORD PATHWAY: process word-level AraBERT embeddings
+        # word_embeddings is a list of (num_words_i, 768) tensors
+        # We need to process each sample in the batch separately because they have different word counts
+        word_out_expanded_list = []
         
-        # Combine both pathways
-        combined = torch.cat([char_out, word_out], dim=-1)  # (batch, seq_len, 1024)
+        for b in range(batch_size):
+            word_emb = word_embeddings[b]  # (num_words, 768)
+            word_boundary = word_boundaries[b]  # List of word lengths
+            
+            if len(word_emb) == 0:
+                # No words in this sample (edge case)
+                word_out_expanded = torch.zeros(
+                    char_seq_len, self.word_out_dim, 
+                    device=char_out.device, dtype=char_out.dtype
+                )
+            else:
+                # Process words through word BiLSTM
+                word_emb_unsqueezed = word_emb.unsqueeze(0)  # (1, num_words, 768)
+                word_out_lstm, _ = self.word_bilstm(word_emb_unsqueezed)  # (1, num_words, 512)
+                word_out_lstm = word_out_lstm.squeeze(0)  # (num_words, 512)
+                
+                # Expand word output to character level (like original .repeat() logic)
+                # Each word embedding is repeated for each character in that word
+                word_out_expanded = []
+                for w_idx, (word_out_vec, num_chars) in enumerate(zip(word_out_lstm, word_boundary)):
+                    # Repeat each word vector num_chars times
+                    repeated = word_out_vec.unsqueeze(0).repeat(num_chars, 1)  # (num_chars, 512)
+                    word_out_expanded.append(repeated)
+                
+                word_out_expanded = torch.cat(word_out_expanded, dim=0)  # (total_chars, 512)
+                
+                # Pad to match char_seq_len if needed (shouldn't be needed if data is aligned)
+                if word_out_expanded.size(0) < char_seq_len:
+                    pad_len = char_seq_len - word_out_expanded.size(0)
+                    padding = torch.zeros(pad_len, self.word_out_dim, 
+                                        device=word_out_expanded.device, dtype=word_out_expanded.dtype)
+                    word_out_expanded = torch.cat([word_out_expanded, padding], dim=0)
+                elif word_out_expanded.size(0) > char_seq_len:
+                    word_out_expanded = word_out_expanded[:char_seq_len]
+            
+            word_out_expanded_list.append(word_out_expanded)
+        
+        # Stack all word outputs
+        word_out_expanded = torch.stack(word_out_expanded_list, dim=0)  # (batch, seq_len, 512)
+        
+        # Concatenate both pathways at character level
+        combined = torch.cat([char_out, word_out_expanded], dim=-1)  # (batch, seq_len, 1024)
         
         # Classifier head
         logits = self.classifier(combined)  # (batch, seq_len, tagset_size)
@@ -177,24 +232,24 @@ class BiLSTMDualPathwayCRF(nn.Module):
         Forward pass
         
         Args:
-            X: Tuple of (char_ids, word_embeddings) OR dict with 'char_ids' and 'word_embedding' keys
+            X: Tuple of (char_ids, word_embeddings, word_boundaries)
             tags: Optional target labels for CRF loss computation
             mask: Optional mask tensor for padding
         
         Returns:
-            If tags is provided: CRF loss
-            If tags is None: CRF viterbi path predictions
+            If tags is provided: CRF loss (or logits if CRF disabled)
+            If tags is None: CRF viterbi path predictions (or logits if CRF disabled)
         """
         
-        # Handle both forward methods (from DataLoader or direct call)
-        if isinstance(X, (tuple, list)):
-            char_ids, word_embeddings = X[0], X[1]
+        # Handle tuple input - pass all 3 components
+        if isinstance(X, (tuple, list)) and len(X) >= 3:
+            # X already has (char_ids, word_embeddings, word_boundaries)
+            pass
         else:
-            # Assume it's already unpacked in train loop
-            char_ids, word_embeddings = X, None
+            raise ValueError("X must be a tuple of (char_ids, word_embeddings, word_boundaries)")
         
         # Get BiLSTM logits
-        logits = self.bilstm(char_ids, word_embeddings, mask=mask)
+        logits = self.bilstm(X, tags=None, mask=mask)  # (batch, seq_len, tagset_size)
         
         if not self.use_crf:
             return logits

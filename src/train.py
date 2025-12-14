@@ -33,7 +33,15 @@ def set_seed(seed=42):
 
 
 class DualPathwayContextualDataset(Dataset):
-    """Custom dataset for dual-pathway model with char IDs + AraBERT embeddings"""
+    """
+    Custom dataset for dual-pathway model with char IDs + word-level AraBERT embeddings.
+    
+    Returns:
+    - char_ids: (num_chars,) - one ID per character for learned embedding pathway
+    - word_embeddings: (num_words, 768) - word-level embeddings for word pathway
+    - word_boundaries: list of word lengths (chars per word) for expansion alignment
+    - labels: (num_chars,) - diacritization labels
+    """
     def __init__(self, X, Y, lines, vocab, config, diacritic2id, embedder):
         self.X = X  # Character sequences
         self.Y = Y
@@ -55,71 +63,91 @@ class DualPathwayContextualDataset(Dataset):
         x_seq = self.X_encoded[idx]
         y_seq = self.Y_encoded[idx]
         
-        # Compute word-level embedding on-the-fly
-        word_emb = self.embedder.embed_line_chars(line)
+        # Get word-level embeddings AND word list
+        word_emb, words = self.embedder.embed_line_words(line)
+        
+        # Compute word boundaries (how many chars per word)
+        word_boundaries = [len(w) for w in words]
         
         return {
             'char_ids': torch.tensor(x_seq, dtype=torch.long),
             'word_embedding': torch.tensor(word_emb, dtype=torch.float32),
+            'word_boundaries': word_boundaries,
             'label': torch.tensor(y_seq, dtype=torch.long),
             'mask': torch.tensor([True] * len(x_seq), dtype=torch.bool)
         }
 
 
 def collate_dual_pathway_batch(batch):
-    """Collate function for dual-pathway model"""
+    """
+    Collate function for dual-pathway model with word-level processing.
+    
+    Handles:
+    - char_ids: character-level sequences
+    - word_embeddings: word-level sequences (different length than chars)
+    - word_boundaries: info for aligning words to characters
+    """
     char_ids = [item['char_ids'] for item in batch]
     word_embeddings = [item['word_embedding'] for item in batch]
+    word_boundaries = [item['word_boundaries'] for item in batch]
     labels = [item['label'] for item in batch]
     masks = [item['mask'] for item in batch]
     
-    # Find max length in this batch
-    max_len = max(max(len(c) for c in char_ids), max(len(w) for w in word_embeddings))
+    # Pad character sequences to max length
+    max_char_len = max(len(c) for c in char_ids)
     
-    # Pad all to max_len
     padded_char_ids = []
     padded_word_embeddings = []
     padded_labels = []
     padded_masks = []
+    padded_word_boundaries = []
     
-    for char_id, word_emb, label, mask in zip(char_ids, word_embeddings, labels, masks):
-        # Pad char IDs
-        pad_len_char = max_len - len(char_id)
+    for char_id, word_emb, word_bound, label, mask in zip(
+        char_ids, word_embeddings, word_boundaries, labels, masks
+    ):
+        # Pad character IDs
+        pad_len_char = max_char_len - len(char_id)
         if pad_len_char > 0:
             padded_char = torch.cat([char_id, torch.zeros(pad_len_char, dtype=torch.long)])
         else:
-            padded_char = char_id[:max_len]
+            padded_char = char_id[:max_char_len]
         
-        # Pad word embeddings
-        pad_len_emb = max_len - len(word_emb)
-        if pad_len_emb > 0:
-            padded_emb = torch.cat([
-                word_emb,
-                torch.zeros(pad_len_emb, word_emb.shape[-1], dtype=torch.float32)
-            ])
-        else:
-            padded_emb = word_emb[:max_len]
+        # Word embeddings stay at word level (NOT padded to char length)
+        # Keep original shape: (num_words, 768)
+        # Model will expand to character level
         
         # Pad labels
-        pad_len_label = max_len - len(label)
+        pad_len_label = max_char_len - len(label)
         if pad_len_label > 0:
             padded_label = torch.cat([label, torch.zeros(pad_len_label, dtype=torch.long)])
         else:
-            padded_label = label[:max_len]
+            padded_label = label[:max_char_len]
         
         # Pad mask
         padded_mask = torch.cat([mask, torch.zeros(pad_len_label, dtype=torch.bool)])
         
         padded_char_ids.append(padded_char)
-        padded_word_embeddings.append(padded_emb)
+        padded_word_embeddings.append(word_emb)  # Keep as-is (word-level)
         padded_labels.append(padded_label)
         padded_masks.append(padded_mask)
+        padded_word_boundaries.append(torch.tensor(word_bound, dtype=torch.long))
+    
+    # Stack char_ids and labels (they have same length)
+    char_ids_batch = torch.stack(padded_char_ids)  # (batch, max_char_len)
+    labels_batch = torch.stack(padded_labels)      # (batch, max_char_len)
+    masks_batch = torch.stack(padded_masks)        # (batch, max_char_len)
+    
+    # Word embeddings can't be stacked (different lengths per sample)
+    # Return as list, model will handle expansion
+    word_embeddings_batch = padded_word_embeddings  # List of (num_words, 768)
+    word_boundaries_batch = padded_word_boundaries  # List of word lengths
     
     return (
-        torch.stack(padded_char_ids),  # (batch, seq_len) - char IDs
-        torch.stack(padded_word_embeddings),  # (batch, seq_len, 768) - word embeddings
-        torch.stack(padded_labels),  # (batch, seq_len)
-        torch.stack(padded_masks)  # (batch, seq_len)
+        char_ids_batch,           # (batch, seq_len) - char IDs
+        word_embeddings_batch,    # List of (num_words, 768) - word embeddings
+        word_boundaries_batch,    # List of word boundaries per sample
+        labels_batch,             # (batch, seq_len) - labels
+        masks_batch               # (batch, seq_len) - masks
     )
 
 
@@ -337,11 +365,14 @@ def evaluate_model(model, dataloader, device, diacritic2id, model_name="bilstm_c
         for batch_data in dataloader:
             # Handle both standard and dual-pathway data formats
             if model_name.lower() in ["bilstm_dual", "bilstm_dual_crf"]:
-                # Dual pathway: char_ids, word_embeddings, y_batch, mask_batch
-                char_ids, word_embeddings, y_batch, mask_batch = batch_data
+                # Dual pathway: char_ids, word_embeddings, word_boundaries, y_batch, mask_batch
+                char_ids, word_embeddings, word_boundaries, y_batch, mask_batch = batch_data
                 char_ids = char_ids.to(device)
-                word_embeddings = word_embeddings.to(device)
-                X_batch = (char_ids, word_embeddings)
+                # Move word embeddings to device (they're a list)
+                word_embeddings = [emb.to(device) for emb in word_embeddings]
+                # Move word boundaries to device (they're a list)
+                word_boundaries = [wb.to(device) for wb in word_boundaries]
+                X_batch = (char_ids, word_embeddings, word_boundaries)
             else:
                 # Standard: X_batch, y_batch, mask_batch
                 X_batch, y_batch, mask_batch = batch_data
@@ -505,11 +536,14 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
         for batch_data in progress_bar:
             # Handle both standard and dual-pathway data formats
             if model_name.lower() in ["bilstm_dual", "bilstm_dual_crf"]:
-                # Dual pathway: char_ids, word_embeddings, y_batch, mask_batch
-                char_ids, word_embeddings, y_batch, mask_batch = batch_data
+                # Dual pathway: char_ids, word_embeddings, word_boundaries, y_batch, mask_batch
+                char_ids, word_embeddings, word_boundaries, y_batch, mask_batch = batch_data
                 char_ids = char_ids.to(device)
-                word_embeddings = word_embeddings.to(device)
-                X_batch = (char_ids, word_embeddings)
+                # Move word embeddings to device (they're a list)
+                word_embeddings = [emb.to(device) for emb in word_embeddings]
+                # Move word boundaries to device (they're a list)
+                word_boundaries = [wb.to(device) for wb in word_boundaries]
+                X_batch = (char_ids, word_embeddings, word_boundaries)
             else:
                 # Standard: X_batch, y_batch, mask_batch
                 X_batch, y_batch, mask_batch = batch_data

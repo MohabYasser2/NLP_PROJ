@@ -158,6 +158,84 @@ class ContextualEmbedder:
 
         return char_vecs
 
+    def embed_line_words(self, line: str) -> Tuple[np.ndarray, List[str]]:
+        """
+        Return word-level embeddings aligned to words in the input line.
+        
+        Returns:
+            embeddings: (num_words, hidden_size) - one embedding per word
+            words: list of words (for word boundaries)
+        
+        shape: (num_words, hidden_size)
+        """
+        line_proc = strip_diacritics(line) if self.config.strip_tashkeel else line
+        line_proc = line_proc.strip()
+
+        if not line_proc:
+            return np.zeros((0, self.hidden_size), dtype=np.float32), []
+
+        # Split into words
+        words = [w for w in line_proc.split() if w]
+        if not words:
+            return np.zeros((0, self.hidden_size), dtype=np.float32), []
+
+        # Encode full sentence
+        enc = self.tokenizer(
+            line_proc,
+            return_tensors="pt",
+            truncation=True,
+            max_length=self.config.max_length,
+            return_offsets_mapping=True,
+        )
+
+        input_ids = enc["input_ids"].to(self.device)
+        attention_mask = enc["attention_mask"].to(self.device)
+        offsets = enc["offset_mapping"][0].tolist()
+
+        with torch.no_grad():
+            if self.config.fp16 and self.device.type == "cuda":
+                with torch.autocast(device_type="cuda", dtype=torch.float16):
+                    out = self.model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        output_hidden_states=True,
+                    )
+            else:
+                out = self.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    output_hidden_states=True,
+                )
+
+        token_vecs = self._aggregate_token_vectors(out)
+        token_vecs = token_vecs.detach().cpu().float().numpy()
+
+        # Build word spans in character indices
+        word_spans = self._compute_word_spans(line_proc)
+
+        # Map tokens to words by overlap with word spans
+        word_embs: List[np.ndarray] = []
+        for (ws, we) in word_spans:
+            idxs = []
+            for ti, (ts, te) in enumerate(offsets):
+                if ts == 0 and te == 0:
+                    continue
+                if te <= ws:
+                    continue
+                if ts >= we:
+                    continue
+                idxs.append(ti)
+
+            if not idxs:
+                word_embs.append(np.zeros((self.hidden_size,), dtype=np.float32))
+            else:
+                word_embs.append(token_vecs[idxs].mean(axis=0).astype(np.float32))
+
+        if not word_embs:
+            return np.zeros((0, self.hidden_size), dtype=np.float32), []
+
+        return np.stack(word_embs, axis=0), words
+
     def embed_corpus_chars(self, lines: List[str]) -> List[np.ndarray]:
         """
         Batch embed many lines. Returns list of arrays, one per line.
