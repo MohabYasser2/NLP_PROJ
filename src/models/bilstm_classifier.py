@@ -185,30 +185,9 @@ class BiLSTMClassifier(nn.Module):
     
     def _compute_logits(self, char_ids, word_ids=None):
         """Compute logits from inputs"""
-        # Check if word_ids is None and char_ids is 3D with last dim not matching vocab
-        if word_ids is None and char_ids.dim() == 3:
-            B, S, D = char_ids.shape
-            # If D is large (embedding dimension), treat as embeddings
-            if D > 100:  # heuristic: embeddings are > 100 dim
-                # This is embeddings from train.py
-                embeddings = char_ids
-                
-                # Process through character-level BiLSTM
-                char_out, _ = self.char_encoder.char_bilstm(embeddings)  # [B, S, char_hidden*2]
-                
-                # Process through word-level BiLSTM
-                word_out, _ = self.word_encoder.word_bilstm(char_out)  # [B, S, word_hidden*2]
-                
-                # Concatenate
-                combined = torch.cat([char_out, word_out], dim=-1)  # [B, S, combined_dim]
-                
-                # Classify
-                logits = self.classifier(combined)  # [B, S, out_classes]
-                
-                return logits
-        
-        # Original mode: two separate inputs [B,S,W] and [B,S]
+        # Check if we have two separate inputs (original mode)
         if word_ids is not None:
+            # Original mode: char_ids [B,S,W] and word_ids [B,S]
             char_out = self.char_encoder(char_ids)  # [B, S, W, char_hidden*2]
             word_out = self.word_encoder(word_ids)  # [B, S, word_hidden*2]
             
@@ -220,24 +199,47 @@ class BiLSTMClassifier(nn.Module):
             
             return logits
         
-        # Fallback: treat [B,S,D] as character embeddings with D <= 100
-        # This handles non-contextual embeddings
-        embeddings = char_ids
-        B, S, D = embeddings.shape
+        # Train.py mode: char_ids is actually embeddings or token indices
+        if char_ids.dim() == 2:
+            # [B, S] - token indices from train.py
+            # Need to embed these first
+            embeddings = self.char_encoder.char_emb(char_ids)  # [B, S, char_emb_dim]
+            
+            # Process through character-level BiLSTM
+            char_out, _ = self.char_encoder.char_bilstm(embeddings)  # [B, S, char_hidden*2]
+            
+            # Process through word-level BiLSTM
+            word_out, _ = self.word_encoder.word_bilstm(char_out)  # [B, S, word_hidden*2]
+            
+            # Concatenate
+            combined = torch.cat([char_out, word_out], dim=-1)  # [B, S, combined_dim]
+            
+            # Classify
+            logits = self.classifier(combined)  # [B, S, out_classes]
+            
+            return logits
         
-        # Process through character-level BiLSTM
-        char_out, _ = self.char_encoder.char_bilstm(embeddings)  # [B, S, char_hidden*2]
+        elif char_ids.dim() == 3:
+            # [B, S, D] - embeddings from train.py
+            B, S, D = char_ids.shape
+            embeddings = char_ids
+            
+            # Process through character-level BiLSTM
+            char_out, _ = self.char_encoder.char_bilstm(embeddings)  # [B, S, char_hidden*2]
+            
+            # Process through word-level BiLSTM
+            word_out, _ = self.word_encoder.word_bilstm(char_out)  # [B, S, word_hidden*2]
+            
+            # Concatenate
+            combined = torch.cat([char_out, word_out], dim=-1)  # [B, S, combined_dim]
+            
+            # Classify
+            logits = self.classifier(combined)  # [B, S, out_classes]
+            
+            return logits
         
-        # Process through word-level BiLSTM
-        word_out, _ = self.word_encoder.word_bilstm(char_out)  # [B, S, word_hidden*2]
-        
-        # Concatenate
-        combined = torch.cat([char_out, word_out], dim=-1)  # [B, S, combined_dim]
-        
-        # Classify
-        logits = self.classifier(combined)  # [B, S, out_classes]
-        
-        return logits
+        else:
+            raise ValueError(f"Unexpected input shape: {char_ids.shape}")
     
     def _compute_loss(self, logits, tags, mask):
         """Compute masked cross-entropy loss"""
