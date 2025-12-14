@@ -32,6 +32,97 @@ def set_seed(seed=42):
     torch.backends.cudnn.benchmark = False
 
 
+class DualPathwayContextualDataset(Dataset):
+    """Custom dataset for dual-pathway model with char IDs + AraBERT embeddings"""
+    def __init__(self, X, Y, lines, vocab, config, diacritic2id, embedder):
+        self.X = X  # Character sequences
+        self.Y = Y
+        self.lines = lines
+        self.vocab = vocab
+        self.config = config
+        self.diacritic2id = diacritic2id
+        self.embedder = embedder
+        
+        # Pre-encode labels and character sequences
+        self.Y_encoded = encode_corpus(Y, diacritic2id)
+        self.X_encoded = [vocab.encode(seq) for seq in X]
+
+    def __len__(self):
+        return len(self.lines)
+
+    def __getitem__(self, idx):
+        line = self.lines[idx]
+        x_seq = self.X_encoded[idx]
+        y_seq = self.Y_encoded[idx]
+        
+        # Compute word-level embedding on-the-fly
+        word_emb = self.embedder.embed_line_chars(line)
+        
+        return {
+            'char_ids': torch.tensor(x_seq, dtype=torch.long),
+            'word_embedding': torch.tensor(word_emb, dtype=torch.float32),
+            'label': torch.tensor(y_seq, dtype=torch.long),
+            'mask': torch.tensor([True] * len(x_seq), dtype=torch.bool)
+        }
+
+
+def collate_dual_pathway_batch(batch):
+    """Collate function for dual-pathway model"""
+    char_ids = [item['char_ids'] for item in batch]
+    word_embeddings = [item['word_embedding'] for item in batch]
+    labels = [item['label'] for item in batch]
+    masks = [item['mask'] for item in batch]
+    
+    # Find max length in this batch
+    max_len = max(max(len(c) for c in char_ids), max(len(w) for w in word_embeddings))
+    
+    # Pad all to max_len
+    padded_char_ids = []
+    padded_word_embeddings = []
+    padded_labels = []
+    padded_masks = []
+    
+    for char_id, word_emb, label, mask in zip(char_ids, word_embeddings, labels, masks):
+        # Pad char IDs
+        pad_len_char = max_len - len(char_id)
+        if pad_len_char > 0:
+            padded_char = torch.cat([char_id, torch.zeros(pad_len_char, dtype=torch.long)])
+        else:
+            padded_char = char_id[:max_len]
+        
+        # Pad word embeddings
+        pad_len_emb = max_len - len(word_emb)
+        if pad_len_emb > 0:
+            padded_emb = torch.cat([
+                word_emb,
+                torch.zeros(pad_len_emb, word_emb.shape[-1], dtype=torch.float32)
+            ])
+        else:
+            padded_emb = word_emb[:max_len]
+        
+        # Pad labels
+        pad_len_label = max_len - len(label)
+        if pad_len_label > 0:
+            padded_label = torch.cat([label, torch.zeros(pad_len_label, dtype=torch.long)])
+        else:
+            padded_label = label[:max_len]
+        
+        # Pad mask
+        padded_mask = torch.cat([mask, torch.zeros(pad_len_label, dtype=torch.bool)])
+        
+        padded_char_ids.append(padded_char)
+        padded_word_embeddings.append(padded_emb)
+        padded_labels.append(padded_label)
+        padded_masks.append(padded_mask)
+    
+    return (
+        torch.stack(padded_char_ids),  # (batch, seq_len) - char IDs
+        torch.stack(padded_word_embeddings),  # (batch, seq_len, 768) - word embeddings
+        torch.stack(padded_labels),  # (batch, seq_len)
+        torch.stack(padded_masks)  # (batch, seq_len)
+    )
+
+
 class ContextualDataset(Dataset):
     """Custom dataset that computes embeddings on-the-fly to save memory"""
     def __init__(self, X, Y, lines, vocab, config, diacritic2id, embedder):
@@ -114,6 +205,7 @@ from src.features.contextual_embeddings import ContextualEmbedder
 
 # Import models
 from src.models.bilstm_crf import BiLSTMCRF
+from src.models.bilstm_classifier import BiLSTMDualPathway, BiLSTMDualPathwayCRF
 # TODO: Import other models when implemented
 # from src.models.rnn import RNNModel
 # from src.models.lstm import LSTMModel
@@ -139,12 +231,18 @@ def load_data(train_path, val_path, max_samples=None):
     return X_train, Y_train, lines_train, X_val, Y_val, lines_val
 
 
-def prepare_data(X, Y, lines, vocab, config, diacritic2id, embedder=None):
+def prepare_data(X, Y, lines, vocab, config, diacritic2id, embedder=None, model_name="bilstm_crf"):
     """Prepare data for training"""
     if config.get("use_contextual", False):
-        # Use custom dataset that computes embeddings on-the-fly
-        print("Preparing dataset (embeddings computed on-the-fly)...")
-        dataset = ContextualDataset(X, Y, lines, vocab, config, diacritic2id, embedder)
+        # Check if this is a dual pathway model
+        if model_name.lower() in ["bilstm_dual", "bilstm_dual_crf"]:
+            # Use dual pathway dataset with char IDs + word embeddings
+            print("Preparing dual-pathway dataset (char IDs + AraBERT embeddings)...")
+            dataset = DualPathwayContextualDataset(X, Y, lines, vocab, config, diacritic2id, embedder)
+        else:
+            # Use standard contextual dataset with only embeddings
+            print("Preparing dataset (embeddings computed on-the-fly)...")
+            dataset = ContextualDataset(X, Y, lines, vocab, config, diacritic2id, embedder)
     else:
         # Encode sequences
         X_encoded = [vocab.encode(seq) for seq in X]
@@ -165,8 +263,10 @@ def prepare_data(X, Y, lines, vocab, config, diacritic2id, embedder=None):
 
 def get_model(model_name, config):
     """Initialize the specified model"""
-    if model_name.lower() == "bilstm_crf":
-        # Filter config to only include parameters that BiLSTMCRF accepts
+    model_name = model_name.lower()
+    
+    if model_name == "bilstm_crf":
+        # Original BiLSTM-CRF model (simple, single pathway)
         model_config = {
             "vocab_size": config["vocab_size"],
             "tagset_size": config["tagset_size"],
@@ -175,8 +275,38 @@ def get_model(model_name, config):
             "use_contextual": config.get("use_contextual", False)
         }
         model = BiLSTMCRF(**model_config)
+    
+    elif model_name == "bilstm_dual":
+        # Dual-pathway BiLSTM (Char + Word level) without CRF
+        model_config = {
+            "vocab_size": config["vocab_size"],
+            "tagset_size": config["tagset_size"],
+            "embedding_dim": config["embedding_dim"],
+            "hidden_dim": config["hidden_dim"],
+            "char_hidden_dim": 256,
+            "word_hidden_dim": 256,
+            "dropout": config.get("dropout", 0.3),
+            "use_contextual": config.get("use_contextual", False)
+        }
+        model = BiLSTMDualPathway(**model_config)
+    
+    elif model_name == "bilstm_dual_crf":
+        # Dual-pathway BiLSTM (Char + Word level) with CRF
+        model_config = {
+            "vocab_size": config["vocab_size"],
+            "tagset_size": config["tagset_size"],
+            "embedding_dim": config["embedding_dim"],
+            "hidden_dim": config["hidden_dim"],
+            "char_hidden_dim": 256,
+            "word_hidden_dim": 256,
+            "dropout": config.get("dropout", 0.3),
+            "use_contextual": config.get("use_contextual", False),
+            "use_crf": True
+        }
+        model = BiLSTMDualPathwayCRF(**model_config)
+    
     else:
-        raise ValueError(f"Model {model_name} not implemented yet")
+        raise ValueError(f"Model '{model_name}' not implemented. Available: bilstm_crf, bilstm_dual, bilstm_dual_crf")
 
     return model
 
@@ -196,7 +326,7 @@ def calculate_der(predictions, targets, mask):
     return errors / total_chars if total_chars > 0 else 0
 
 
-def evaluate_model(model, dataloader, device, diacritic2id):
+def evaluate_model(model, dataloader, device, diacritic2id, model_name="bilstm_crf"):
     """Evaluate model on validation set"""
     model.eval()
     all_predictions = []
@@ -204,8 +334,19 @@ def evaluate_model(model, dataloader, device, diacritic2id):
     all_masks = []
 
     with torch.no_grad():
-        for X_batch, y_batch, mask_batch in dataloader:
-            X_batch = X_batch.to(device)
+        for batch_data in dataloader:
+            # Handle both standard and dual-pathway data formats
+            if model_name.lower() in ["bilstm_dual", "bilstm_dual_crf"]:
+                # Dual pathway: char_ids, word_embeddings, y_batch, mask_batch
+                char_ids, word_embeddings, y_batch, mask_batch = batch_data
+                char_ids = char_ids.to(device)
+                word_embeddings = word_embeddings.to(device)
+                X_batch = (char_ids, word_embeddings)
+            else:
+                # Standard: X_batch, y_batch, mask_batch
+                X_batch, y_batch, mask_batch = batch_data
+                X_batch = X_batch.to(device)
+            
             mask_batch = mask_batch.to(device)
 
             predictions = model(X_batch, mask=mask_batch)
@@ -303,15 +444,18 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
     print(f"Updated config with vocab_size: {config['vocab_size']}")
 
     # Prepare datasets
-    train_dataset = prepare_data(X_train, Y_train, lines_train, vocab, config, diacritic2id, embedder)
-    val_dataset = prepare_data(X_val, Y_val, lines_val, vocab, config, diacritic2id, embedder)
+    train_dataset = prepare_data(X_train, Y_train, lines_train, vocab, config, diacritic2id, embedder, model_name)
+    val_dataset = prepare_data(X_val, Y_val, lines_val, vocab, config, diacritic2id, embedder, model_name)
 
     # Create dataloaders
     # Note: batch_size should be reasonable when using contextual embeddings
     batch_size = DATA_CONFIG['batch_size'] if not config.get("use_contextual", False) else 1
     
     # Use custom collate function for contextual embeddings
-    collate_fn = collate_contextual_batch if config.get("use_contextual", False) else None
+    if model_name.lower() in ["bilstm_dual", "bilstm_dual_crf"]:
+        collate_fn = collate_dual_pathway_batch
+    else:
+        collate_fn = collate_contextual_batch if config.get("use_contextual", False) else None
     
     train_loader = DataLoader(
         train_dataset,
@@ -358,8 +502,19 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
         train_steps = 0
 
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config['num_epochs']}")
-        for X_batch, y_batch, mask_batch in progress_bar:
-            X_batch = X_batch.to(device)
+        for batch_data in progress_bar:
+            # Handle both standard and dual-pathway data formats
+            if model_name.lower() in ["bilstm_dual", "bilstm_dual_crf"]:
+                # Dual pathway: char_ids, word_embeddings, y_batch, mask_batch
+                char_ids, word_embeddings, y_batch, mask_batch = batch_data
+                char_ids = char_ids.to(device)
+                word_embeddings = word_embeddings.to(device)
+                X_batch = (char_ids, word_embeddings)
+            else:
+                # Standard: X_batch, y_batch, mask_batch
+                X_batch, y_batch, mask_batch = batch_data
+                X_batch = X_batch.to(device)
+            
             y_batch = y_batch.to(device)
             mask_batch = mask_batch.to(device)
 
@@ -381,7 +536,7 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
         avg_train_loss = train_loss / train_steps
 
         # Validation
-        val_accuracy, val_der = evaluate_model(model, val_loader, device, diacritic2id)
+        val_accuracy, val_der = evaluate_model(model, val_loader, device, diacritic2id, model_name)
 
         print(f"Epoch {epoch+1}/{config['num_epochs']} | Train Loss: {avg_train_loss:.4f} | Val Accuracy: {val_accuracy:.4f} | DER: {val_der:.4f}")
 
@@ -423,7 +578,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Arabic Diacritization Models")
     parser.add_argument(
         "--model",
-        choices=["rnn", "lstm", "crf", "bilstm_crf"],
+        choices=["rnn", "lstm", "crf", "bilstm_crf", "bilstm_dual", "bilstm_dual_crf"],
         default="bilstm_crf",
         help="Model to train"
     )
