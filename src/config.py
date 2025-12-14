@@ -94,6 +94,52 @@ BILSTM_CRF_CONFIG = {
 }
 
 # ======================================================
+# BiLSTM Dual-Pathway Model Configuration
+# ======================================================
+
+BILSTM_DUAL_CONFIG = {
+    "vocab_size": None,  # Will be set dynamically based on data
+    "tagset_size": NUM_DIACRITIC_CLASSES,
+    "embedding_dim": 768,  # AraBERT hidden size
+    "hidden_dim": 256,
+    "char_emb_dim": 128,  # Learned character embeddings
+    "char_hidden_dim": 256,
+    "word_hidden_dim": 256,
+    "num_layers": 2,
+    "dropout": 0.3,
+    "learning_rate": 0.001,
+    "weight_decay": 1e-5,
+    "num_epochs": 50,
+    "patience": 7,
+    "gradient_clip": 5.0,
+    "use_crf": False,  # No CRF for basic dual pathway
+    "use_contextual": True  # Use AraBERT for word-level
+}
+
+# ======================================================
+# BiLSTM Dual-Pathway + CRF Model Configuration
+# ======================================================
+
+BILSTM_DUAL_CRF_CONFIG = {
+    "vocab_size": None,  # Will be set dynamically based on data
+    "tagset_size": NUM_DIACRITIC_CLASSES,
+    "embedding_dim": 768,  # AraBERT hidden size
+    "hidden_dim": 256,
+    "char_emb_dim": 128,  # Learned character embeddings
+    "char_hidden_dim": 256,
+    "word_hidden_dim": 256,
+    "num_layers": 2,
+    "dropout": 0.3,
+    "learning_rate": 0.001,
+    "weight_decay": 1e-5,
+    "num_epochs": 50,
+    "patience": 7,
+    "gradient_clip": 5.0,
+    "use_crf": True,  # With CRF for better sequence prediction
+    "use_contextual": True  # Use AraBERT for word-level
+}
+
+# ======================================================
 # CONFIGURATION NOTES FOR HIGH ACCURACY
 # ======================================================
 # 
@@ -173,7 +219,9 @@ def get_model_config(model_name: str):
         "rnn": RNN_CONFIG,
         "lstm": LSTM_CONFIG,
         "crf": CRF_CONFIG,
-        "bilstm_crf": BILSTM_CRF_CONFIG
+        "bilstm_crf": BILSTM_CRF_CONFIG,
+        "bilstm_dual": BILSTM_DUAL_CONFIG,
+        "bilstm_dual_crf": BILSTM_DUAL_CRF_CONFIG
     }
     return configs.get(model_name.lower())
 
