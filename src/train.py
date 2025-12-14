@@ -14,7 +14,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, Dataset
 import numpy as np
 import random
 from tqdm import tqdm
@@ -30,6 +30,76 @@ def set_seed(seed=42):
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+
+class ContextualDataset(Dataset):
+    """Custom dataset that computes embeddings on-the-fly to save memory"""
+    def __init__(self, X, Y, lines, vocab, config, diacritic2id, embedder):
+        self.X = X
+        self.Y = Y
+        self.lines = lines
+        self.vocab = vocab
+        self.config = config
+        self.diacritic2id = diacritic2id
+        self.embedder = embedder
+        
+        # Pre-encode labels to avoid redundant computation
+        self.Y_encoded = encode_corpus(Y, diacritic2id)
+
+    def __len__(self):
+        return len(self.lines)
+
+    def __getitem__(self, idx):
+        line = self.lines[idx]
+        y_seq = self.Y_encoded[idx]
+        
+        # Compute embedding on-the-fly
+        emb = self.embedder.embed_line_chars(line)
+        
+        # Pad to max length in batch (handled by collate_fn)
+        y_padded = np.pad(y_seq, (0, max(0, len(emb) - len(y_seq))), mode='constant')
+        
+        return {
+            'embedding': torch.tensor(emb, dtype=torch.float32),
+            'label': torch.tensor(y_padded[:len(emb)], dtype=torch.long),
+            'mask': torch.tensor([True] * len(emb), dtype=torch.bool)
+        }
+
+
+def collate_contextual_batch(batch):
+    """Collate function to pad embeddings in a batch"""
+    embeddings = [item['embedding'] for item in batch]
+    labels = [item['label'] for item in batch]
+    masks = [item['mask'] for item in batch]
+    
+    # Find max length in this batch
+    max_len = max(len(emb) for emb in embeddings)
+    
+    # Pad all to max_len
+    padded_embeddings = []
+    padded_labels = []
+    padded_masks = []
+    
+    for emb, label, mask in zip(embeddings, labels, masks):
+        pad_len = max_len - len(emb)
+        if pad_len > 0:
+            padded_emb = torch.nn.functional.pad(emb, (0, 0, 0, pad_len), value=0.0)
+            padded_label = torch.nn.functional.pad(label.unsqueeze(0), (0, pad_len), value=0).squeeze(0)
+            padded_mask = torch.cat([mask, torch.zeros(pad_len, dtype=torch.bool)])
+        else:
+            padded_emb = emb
+            padded_label = label
+            padded_mask = mask
+        
+        padded_embeddings.append(padded_emb)
+        padded_labels.append(padded_label)
+        padded_masks.append(padded_mask)
+    
+    return (
+        torch.stack(padded_embeddings),
+        torch.stack(padded_labels),
+        torch.stack(padded_masks)
+    )
 
 # Import our modules
 from src.preprocessing.tokenize import tokenize_file
@@ -72,30 +142,9 @@ def load_data(train_path, val_path, max_samples=None):
 def prepare_data(X, Y, lines, vocab, config, diacritic2id, embedder=None):
     """Prepare data for training"""
     if config.get("use_contextual", False):
-        # Use contextual embeddings
-        print("Computing contextual embeddings...")
-        embeddings = []
-        for line in tqdm(lines, desc="Computing embeddings", unit="line"):
-            emb = embedder.embed_line_chars(line)
-            embeddings.append(emb)
-
-        # Pad embeddings
-        max_len = max(len(emb) for emb in embeddings)
-        padded_embeddings = []
-        mask = []
-
-        for emb in tqdm(embeddings, desc="Padding embeddings", unit="embedding"):
-            # Pad with zeros
-            pad_len = max_len - len(emb)
-            if pad_len > 0:
-                padded_emb = np.pad(emb, ((0, pad_len), (0, 0)), mode='constant')
-            else:
-                padded_emb = emb
-            padded_embeddings.append(padded_emb)
-            mask.append([True] * len(emb) + [False] * pad_len)
-
-        X_padded = torch.tensor(np.stack(padded_embeddings), dtype=torch.float32)
-        mask = torch.tensor(mask, dtype=torch.bool)
+        # Use custom dataset that computes embeddings on-the-fly
+        print("Preparing dataset (embeddings computed on-the-fly)...")
+        dataset = ContextualDataset(X, Y, lines, vocab, config, diacritic2id, embedder)
     else:
         # Encode sequences
         X_encoded = [vocab.encode(seq) for seq in X]
@@ -103,13 +152,13 @@ def prepare_data(X, Y, lines, vocab, config, diacritic2id, embedder=None):
         # Pad sequences
         X_padded, mask = pad_sequences(X_encoded, pad_value=vocab.char2id["<PAD>"])
 
-    # Encode labels using the loaded diacritic mapping
-    Y_encoded = encode_corpus(Y, diacritic2id)
+        # Encode labels using the loaded diacritic mapping
+        Y_encoded = encode_corpus(Y, diacritic2id)
 
-    Y_padded, _ = pad_sequences(Y_encoded, pad_value=0)  # Use 0 for padding (valid tag index)
+        Y_padded, _ = pad_sequences(Y_encoded, pad_value=0)  # Use 0 for padding (valid tag index)
 
-    # Create dataset
-    dataset = TensorDataset(X_padded, Y_padded, mask)
+        # Create dataset
+        dataset = TensorDataset(X_padded, Y_padded, mask)
 
     return dataset
 
@@ -261,15 +310,20 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
     # Note: batch_size should be reasonable when using contextual embeddings
     batch_size = DATA_CONFIG['batch_size'] if not config.get("use_contextual", False) else 1
     
+    # Use custom collate function for contextual embeddings
+    collate_fn = collate_contextual_batch if config.get("use_contextual", False) else None
+    
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
-        shuffle=True
+        shuffle=True,
+        collate_fn=collate_fn
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
-        shuffle=False
+        shuffle=False,
+        collate_fn=collate_fn
     )
 
     # Initialize model
