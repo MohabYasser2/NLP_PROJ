@@ -1,4 +1,29 @@
-# Placeholder for requirements
-# List all dependencies here
-torch
-TorchCRF
+# ============================================================================
+# Arabic Diacritization BiLSTM-CRF Training Requirements
+# ============================================================================
+
+# Core Deep Learning
+torch>=2.0.0
+transformers>=4.30.0
+
+# CRF for sequence labeling
+TorchCRF>=1.1.0
+
+# Data processing and utilities
+numpy>=1.21.0
+pandas>=1.3.0
+scikit-learn>=1.0.0
+
+# Progress bars and logging
+tqdm>=4.62.0
+
+# NLP and preprocessing
+regex>=2022.3.0
+
+# Optional: For better CUDA support
+# torch-cuda-runtime>=11.8  # Uncomment if needed
+
+# Optional: For development
+# pytest>=7.0.0
+# black>=22.0.0
+# flake8>=4.0.0
