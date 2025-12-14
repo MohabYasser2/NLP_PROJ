@@ -505,6 +505,9 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
     model = get_model(model_name, config)
     model.to(device)
 
+    # Loss criterion (for non-CRF models)
+    criterion = nn.CrossEntropyLoss(reduction='mean', ignore_index=0)  # ignore padding
+
     # Optimizer and scheduler
     optimizer = torch.optim.Adam(
         model.parameters(),
@@ -554,7 +557,24 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
 
             optimizer.zero_grad()
 
-            loss = model(X_batch, tags=y_batch, mask=mask_batch)
+            # Forward pass
+            if model_name.lower() in ["bilstm_crf", "bilstm_dual_crf"]:
+                # CRF models: returns loss directly
+                loss = model(X_batch, tags=y_batch, mask=mask_batch)
+            else:
+                # Non-CRF models: get logits and compute loss
+                logits = model(X_batch, tags=None, mask=mask_batch)
+                # Reshape for loss computation: (batch*seq_len, num_classes)
+                batch_size, seq_len, num_classes = logits.shape
+                logits_flat = logits.view(-1, num_classes)
+                y_flat = y_batch.view(-1)
+                mask_flat = mask_batch.view(-1)
+                
+                # Compute loss only on non-padded positions
+                loss = criterion(logits_flat, y_flat)
+                if mask_flat.sum() > 0:
+                    loss = (loss * mask_flat.float()).sum() / mask_flat.float().sum()
+            
             loss.backward()
 
             # Gradient clipping
