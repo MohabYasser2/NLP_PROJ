@@ -75,7 +75,7 @@ def prepare_data(X, Y, lines, vocab, config, diacritic2id, embedder=None):
         # Use contextual embeddings
         print("Computing contextual embeddings...")
         embeddings = []
-        for line in lines:
+        for line in tqdm(lines, desc="Computing embeddings", unit="line"):
             emb = embedder.embed_line_chars(line)
             embeddings.append(emb)
 
@@ -84,7 +84,7 @@ def prepare_data(X, Y, lines, vocab, config, diacritic2id, embedder=None):
         padded_embeddings = []
         mask = []
 
-        for emb in embeddings:
+        for emb in tqdm(embeddings, desc="Padding embeddings", unit="embedding"):
             # Pad with zeros
             pad_len = max_len - len(emb)
             if pad_len > 0:
