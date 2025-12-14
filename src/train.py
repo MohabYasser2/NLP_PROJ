@@ -246,14 +246,17 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
     val_dataset = prepare_data(X_val, Y_val, lines_val, vocab, config, diacritic2id, embedder)
 
     # Create dataloaders
+    # Note: batch_size should be reasonable when using contextual embeddings
+    batch_size = DATA_CONFIG['batch_size'] if not config.get("use_contextual", False) else 1
+    
     train_loader = DataLoader(
         train_dataset,
-        batch_size=1,  # Temporary for debugging
+        batch_size=batch_size,
         shuffle=True
     )
     val_loader = DataLoader(
         val_dataset,
-        batch_size=1,  # Temporary for debugging
+        batch_size=batch_size,
         shuffle=False
     )
 
