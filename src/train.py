@@ -478,7 +478,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Arabic Diacritization Models")
     parser.add_argument(
         "--model",
-        choices=["rnn", "lstm", "crf", "bilstm_crf"],
+        choices=["rnn", "lstm", "crf", "bilstm_crf", "bilstm_classifier", "bilstm_classifier_crf"],
         default="bilstm_crf",
         help="Model to train"
     )
