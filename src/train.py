@@ -236,7 +236,7 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
         embedder = ContextualEmbedder(
             model_name="aubmindlab/bert-base-arabertv02",
             device=device.type,
-            cache_dir="data/processed/contextual_cache"
+            cache_dir=None  # Disable caching to avoid disk space issues on Kaggle
         )
         # Update embedding_dim for contextual
         config["embedding_dim"] = embedder.hidden_size
