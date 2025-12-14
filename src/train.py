@@ -348,6 +348,15 @@ def calculate_der(predictions, targets, mask):
         for p, t, m in zip(pred_seq, target_seq, mask_seq):
             if m:  # Only count non-padded positions
                 total_chars += 1
+                # Convert tensors to int
+                if isinstance(p, torch.Tensor):
+                    p = int(p.cpu().item())
+                else:
+                    p = int(p)
+                if isinstance(t, torch.Tensor):
+                    t = int(t.cpu().item())
+                else:
+                    t = int(t)
                 if p != t:
                     errors += 1
 
@@ -384,6 +393,11 @@ def evaluate_model(model, dataloader, device, diacritic2id, model_name="bilstm_c
 
             # predictions is a list of lists (one per sequence in batch)
             # y_batch is tensor, mask_batch is tensor
+            # Move predictions to CPU if they're tensors
+            if isinstance(predictions, list) and len(predictions) > 0:
+                # CRF returns list of lists (already on CPU)
+                pass
+            
             for pred_seq, target_seq, mask_seq in zip(predictions, y_batch, mask_batch):
                 pred_flat = []
                 target_flat = []
@@ -391,8 +405,13 @@ def evaluate_model(model, dataloader, device, diacritic2id, model_name="bilstm_c
 
                 for p, t, m in zip(pred_seq, target_seq, mask_seq):
                     if m:
+                        # Convert p to int if it's a tensor (on CPU or GPU)
+                        if isinstance(p, torch.Tensor):
+                            p = int(p.cpu().item())
+                        else:
+                            p = int(p)
                         pred_flat.append(p)
-                        target_flat.append(t.item())
+                        target_flat.append(t.item() if isinstance(t, torch.Tensor) else int(t))
                         mask_flat.append(True)
 
                 if pred_flat:
@@ -409,6 +428,11 @@ def evaluate_model(model, dataloader, device, diacritic2id, model_name="bilstm_c
             if m:  # Only non-padded positions
                 # Skip spaces (empty diacritic) for accuracy calculation
                 if t != diacritic2id['']:
+                    # Ensure p is int (in case it's a tensor)
+                    if isinstance(p, torch.Tensor):
+                        p = int(p.cpu().item())
+                    else:
+                        p = int(p)
                     flat_predictions.append(p)
                     flat_targets.append(t)
 
