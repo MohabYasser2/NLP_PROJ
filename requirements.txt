@@ -1,0 +1,4 @@
+# Placeholder for requirements
+# List all dependencies here
+torch
+TorchCRF

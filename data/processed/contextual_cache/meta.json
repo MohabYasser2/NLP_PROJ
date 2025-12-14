@@ -1,0 +1,6 @@
+{
+  "model_name": "aubmindlab/bert-base-arabertv02",
+  "max_length": 256,
+  "agg": "last4_mean",
+  "strip_tashkeel": true
+}
