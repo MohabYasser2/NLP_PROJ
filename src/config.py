@@ -32,7 +32,7 @@ RNN_CONFIG = {
     "bidirectional": False,
     "learning_rate": 0.001,
     "weight_decay": 1e-5,
-    "num_epochs": 50,
+    "num_epochs": 20,
     "patience": 5,  # Early stopping patience
     "gradient_clip": 5.0
 }
@@ -50,7 +50,7 @@ LSTM_CONFIG = {
     "bidirectional": False,
     "learning_rate": 0.001,
     "weight_decay": 1e-5,
-    "num_epochs": 50,
+    "num_epochs": 20,
     "patience": 5,
     "gradient_clip": 5.0
 }
@@ -67,7 +67,7 @@ CRF_CONFIG = {
     "dropout": 0.2,
     "learning_rate": 0.01,
     "weight_decay": 1e-4,
-    "num_epochs": 30,
+    "num_epochs": 20,
     "patience": 5,
     "gradient_clip": 1.0,
     "use_crf": True
@@ -86,7 +86,7 @@ BILSTM_CRF_CONFIG = {
     "dropout": 0.3,
     "learning_rate": 0.001,
     "weight_decay": 1e-5,
-    "num_epochs": 50,
+    "num_epochs": 20,
     "patience": 7,
     "gradient_clip": 5.0,
     "use_crf": True,
@@ -109,7 +109,7 @@ BILSTM_DUAL_CONFIG = {
     "dropout": 0.3,
     "learning_rate": 0.001,
     "weight_decay": 1e-5,
-    "num_epochs": 50,
+    "num_epochs": 20,
     "patience": 7,
     "gradient_clip": 5.0,
     "use_crf": False,  # No CRF for basic dual pathway
@@ -132,7 +132,7 @@ BILSTM_DUAL_CRF_CONFIG = {
     "dropout": 0.3,
     "learning_rate": 0.001,
     "weight_decay": 1e-5,
-    "num_epochs": 50,
+    "num_epochs": 20,
     "patience": 7,
     "gradient_clip": 5.0,
     "use_crf": True,  # With CRF for better sequence prediction
