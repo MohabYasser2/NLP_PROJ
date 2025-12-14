@@ -109,7 +109,7 @@ BILSTM_DUAL_CONFIG = {
     "dropout": 0.3,
     "learning_rate": 0.001,
     "weight_decay": 1e-5,
-    "num_epochs": 20,
+    "num_epochs": 12,
     "patience": 7,
     "gradient_clip": 5.0,
     "use_crf": False,  # No CRF for basic dual pathway
