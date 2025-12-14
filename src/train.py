@@ -32,125 +32,6 @@ def set_seed(seed=42):
     torch.backends.cudnn.benchmark = False
 
 
-class DualPathwayContextualDataset(Dataset):
-    """
-    Custom dataset for dual-pathway model with char IDs + word-level AraBERT embeddings.
-    
-    Returns:
-    - char_ids: (num_chars,) - one ID per character for learned embedding pathway
-    - word_embeddings: (num_words, 768) - word-level embeddings for word pathway
-    - word_boundaries: list of word lengths (chars per word) for expansion alignment
-    - labels: (num_chars,) - diacritization labels
-    """
-    def __init__(self, X, Y, lines, vocab, config, diacritic2id, embedder):
-        self.X = X  # Character sequences
-        self.Y = Y
-        self.lines = lines
-        self.vocab = vocab
-        self.config = config
-        self.diacritic2id = diacritic2id
-        self.embedder = embedder
-        
-        # Pre-encode labels and character sequences
-        self.Y_encoded = encode_corpus(Y, diacritic2id)
-        self.X_encoded = [vocab.encode(seq) for seq in X]
-
-    def __len__(self):
-        return len(self.lines)
-
-    def __getitem__(self, idx):
-        line = self.lines[idx]
-        x_seq = self.X_encoded[idx]
-        y_seq = self.Y_encoded[idx]
-        
-        # Get word-level embeddings AND word list
-        word_emb, words = self.embedder.embed_line_words(line)
-        
-        # Compute word boundaries (how many chars per word)
-        word_boundaries = [len(w) for w in words]
-        
-        return {
-            'char_ids': torch.tensor(x_seq, dtype=torch.long),
-            'word_embedding': torch.tensor(word_emb, dtype=torch.float32),
-            'word_boundaries': word_boundaries,
-            'label': torch.tensor(y_seq, dtype=torch.long),
-            'mask': torch.tensor([True] * len(x_seq), dtype=torch.bool)
-        }
-
-
-def collate_dual_pathway_batch(batch):
-    """
-    Collate function for dual-pathway model with word-level processing.
-    
-    Handles:
-    - char_ids: character-level sequences
-    - word_embeddings: word-level sequences (different length than chars)
-    - word_boundaries: info for aligning words to characters
-    """
-    char_ids = [item['char_ids'] for item in batch]
-    word_embeddings = [item['word_embedding'] for item in batch]
-    word_boundaries = [item['word_boundaries'] for item in batch]
-    labels = [item['label'] for item in batch]
-    masks = [item['mask'] for item in batch]
-    
-    # Pad character sequences to max length
-    max_char_len = max(len(c) for c in char_ids)
-    
-    padded_char_ids = []
-    padded_word_embeddings = []
-    padded_labels = []
-    padded_masks = []
-    padded_word_boundaries = []
-    
-    for char_id, word_emb, word_bound, label, mask in zip(
-        char_ids, word_embeddings, word_boundaries, labels, masks
-    ):
-        # Pad character IDs
-        pad_len_char = max_char_len - len(char_id)
-        if pad_len_char > 0:
-            padded_char = torch.cat([char_id, torch.zeros(pad_len_char, dtype=torch.long)])
-        else:
-            padded_char = char_id[:max_char_len]
-        
-        # Word embeddings stay at word level (NOT padded to char length)
-        # Keep original shape: (num_words, 768)
-        # Model will expand to character level
-        
-        # Pad labels
-        pad_len_label = max_char_len - len(label)
-        if pad_len_label > 0:
-            padded_label = torch.cat([label, torch.zeros(pad_len_label, dtype=torch.long)])
-        else:
-            padded_label = label[:max_char_len]
-        
-        # Pad mask
-        padded_mask = torch.cat([mask, torch.zeros(pad_len_label, dtype=torch.bool)])
-        
-        padded_char_ids.append(padded_char)
-        padded_word_embeddings.append(word_emb)  # Keep as-is (word-level)
-        padded_labels.append(padded_label)
-        padded_masks.append(padded_mask)
-        padded_word_boundaries.append(torch.tensor(word_bound, dtype=torch.long))
-    
-    # Stack char_ids and labels (they have same length)
-    char_ids_batch = torch.stack(padded_char_ids)  # (batch, max_char_len)
-    labels_batch = torch.stack(padded_labels)      # (batch, max_char_len)
-    masks_batch = torch.stack(padded_masks)        # (batch, max_char_len)
-    
-    # Word embeddings can't be stacked (different lengths per sample)
-    # Return as list, model will handle expansion
-    word_embeddings_batch = padded_word_embeddings  # List of (num_words, 768)
-    word_boundaries_batch = padded_word_boundaries  # List of word lengths
-    
-    return (
-        char_ids_batch,           # (batch, seq_len) - char IDs
-        word_embeddings_batch,    # List of (num_words, 768) - word embeddings
-        word_boundaries_batch,    # List of word boundaries per sample
-        labels_batch,             # (batch, seq_len) - labels
-        masks_batch               # (batch, seq_len) - masks
-    )
-
-
 class ContextualDataset(Dataset):
     """Custom dataset that computes embeddings on-the-fly to save memory"""
     def __init__(self, X, Y, lines, vocab, config, diacritic2id, embedder):
@@ -233,7 +114,7 @@ from src.features.contextual_embeddings import ContextualEmbedder
 
 # Import models
 from src.models.bilstm_crf import BiLSTMCRF
-from src.models.bilstm_classifier import BiLSTMDualPathway, BiLSTMDualPathwayCRF
+from src.models.bilstm_classifier import BiLSTMClassifier, BiLSTMCRFClassifier
 # TODO: Import other models when implemented
 # from src.models.rnn import RNNModel
 # from src.models.lstm import LSTMModel
@@ -259,18 +140,12 @@ def load_data(train_path, val_path, max_samples=None):
     return X_train, Y_train, lines_train, X_val, Y_val, lines_val
 
 
-def prepare_data(X, Y, lines, vocab, config, diacritic2id, embedder=None, model_name="bilstm_crf"):
+def prepare_data(X, Y, lines, vocab, config, diacritic2id, embedder=None):
     """Prepare data for training"""
     if config.get("use_contextual", False):
-        # Check if this is a dual pathway model
-        if model_name.lower() in ["bilstm_dual", "bilstm_dual_crf"]:
-            # Use dual pathway dataset with char IDs + word embeddings
-            print("Preparing dual-pathway dataset (char IDs + AraBERT embeddings)...")
-            dataset = DualPathwayContextualDataset(X, Y, lines, vocab, config, diacritic2id, embedder)
-        else:
-            # Use standard contextual dataset with only embeddings
-            print("Preparing dataset (embeddings computed on-the-fly)...")
-            dataset = ContextualDataset(X, Y, lines, vocab, config, diacritic2id, embedder)
+        # Use custom dataset that computes embeddings on-the-fly
+        print("Preparing dataset (embeddings computed on-the-fly)...")
+        dataset = ContextualDataset(X, Y, lines, vocab, config, diacritic2id, embedder)
     else:
         # Encode sequences
         X_encoded = [vocab.encode(seq) for seq in X]
@@ -294,7 +169,7 @@ def get_model(model_name, config):
     model_name = model_name.lower()
     
     if model_name == "bilstm_crf":
-        # Original BiLSTM-CRF model (simple, single pathway)
+        # Original BiLSTM-CRF model
         model_config = {
             "vocab_size": config["vocab_size"],
             "tagset_size": config["tagset_size"],
@@ -304,37 +179,39 @@ def get_model(model_name, config):
         }
         model = BiLSTMCRF(**model_config)
     
-    elif model_name == "bilstm_dual":
-        # Dual-pathway BiLSTM (Char + Word level) without CRF
+    elif model_name == "bilstm_classifier":
+        # Hierarchical BiLSTM (Word + Char level) without CRF
         model_config = {
             "vocab_size": config["vocab_size"],
             "tagset_size": config["tagset_size"],
             "embedding_dim": config["embedding_dim"],
             "hidden_dim": config["hidden_dim"],
-            "char_hidden_dim": 256,
-            "word_hidden_dim": 256,
+            "char_emb_dim": config.get("char_emb_dim", 128),
+            "char_hidden_dim": config.get("char_hidden_dim", 128),
+            "word_hidden_dim": config.get("word_hidden_dim", 128),
             "dropout": config.get("dropout", 0.3),
             "use_contextual": config.get("use_contextual", False)
         }
-        model = BiLSTMDualPathway(**model_config)
+        model = BiLSTMClassifier(**model_config)
     
-    elif model_name == "bilstm_dual_crf":
-        # Dual-pathway BiLSTM (Char + Word level) with CRF
+    elif model_name == "bilstm_classifier_crf":
+        # Hierarchical BiLSTM (Word + Char level) with CRF
         model_config = {
             "vocab_size": config["vocab_size"],
             "tagset_size": config["tagset_size"],
             "embedding_dim": config["embedding_dim"],
             "hidden_dim": config["hidden_dim"],
-            "char_hidden_dim": 256,
-            "word_hidden_dim": 256,
+            "char_emb_dim": config.get("char_emb_dim", 128),
+            "char_hidden_dim": config.get("char_hidden_dim", 128),
+            "word_hidden_dim": config.get("word_hidden_dim", 128),
             "dropout": config.get("dropout", 0.3),
             "use_contextual": config.get("use_contextual", False),
             "use_crf": True
         }
-        model = BiLSTMDualPathwayCRF(**model_config)
+        model = BiLSTMCRFClassifier(**model_config)
     
     else:
-        raise ValueError(f"Model '{model_name}' not implemented. Available: bilstm_crf, bilstm_dual, bilstm_dual_crf")
+        raise ValueError(f"Model '{model_name}' not implemented. Available: bilstm_crf, bilstm_classifier, bilstm_classifier_crf")
 
     return model
 
@@ -348,22 +225,13 @@ def calculate_der(predictions, targets, mask):
         for p, t, m in zip(pred_seq, target_seq, mask_seq):
             if m:  # Only count non-padded positions
                 total_chars += 1
-                # Convert tensors to int
-                if isinstance(p, torch.Tensor):
-                    p = int(p.cpu().item())
-                else:
-                    p = int(p)
-                if isinstance(t, torch.Tensor):
-                    t = int(t.cpu().item())
-                else:
-                    t = int(t)
                 if p != t:
                     errors += 1
 
     return errors / total_chars if total_chars > 0 else 0
 
 
-def evaluate_model(model, dataloader, device, diacritic2id, model_name="bilstm_crf"):
+def evaluate_model(model, dataloader, device, diacritic2id):
     """Evaluate model on validation set"""
     model.eval()
     all_predictions = []
@@ -371,55 +239,49 @@ def evaluate_model(model, dataloader, device, diacritic2id, model_name="bilstm_c
     all_masks = []
 
     with torch.no_grad():
-        for batch_data in dataloader:
-            # Handle both standard and dual-pathway data formats
-            if model_name.lower() in ["bilstm_dual", "bilstm_dual_crf"]:
-                # Dual pathway: char_ids, word_embeddings, word_boundaries, y_batch, mask_batch
-                char_ids, word_embeddings, word_boundaries, y_batch, mask_batch = batch_data
-                char_ids = char_ids.to(device)
-                # Move word embeddings to device (they're a list)
-                word_embeddings = [emb.to(device) for emb in word_embeddings]
-                # Move word boundaries to device (they're a list)
-                word_boundaries = [wb.to(device) for wb in word_boundaries]
-                X_batch = (char_ids, word_embeddings, word_boundaries)
-            else:
-                # Standard: X_batch, y_batch, mask_batch
-                X_batch, y_batch, mask_batch = batch_data
-                X_batch = X_batch.to(device)
-            
+        for X_batch, y_batch, mask_batch in dataloader:
+            X_batch = X_batch.to(device)
             mask_batch = mask_batch.to(device)
 
             predictions = model(X_batch, mask=mask_batch)
 
-            # Handle different prediction formats:
-            # - CRF models return: list of lists (already on CPU)
-            # - Dual-pathway models return: tensor logits (on GPU, need to convert)
+            # Check if predictions are logits (from BiLSTMClassifier) or viterbi paths (from CRF)
             if isinstance(predictions, torch.Tensor):
-                # Dual-pathway models: convert logits to predictions (argmax)
-                # predictions shape: (batch, seq_len, num_classes)
-                predictions = predictions.argmax(dim=-1)  # (batch, seq_len)
-                # Convert to list of lists for compatibility
-                predictions = [seq.cpu().numpy().tolist() for seq in predictions]
-            
-            # Now predictions is always a list of lists
-            for pred_seq, target_seq, mask_seq in zip(predictions, y_batch, mask_batch):
-                pred_flat = []
-                target_flat = []
-                mask_flat = []
+                # BiLSTMClassifier returns logits: (batch, seq, num_classes)
+                # Convert to class indices
+                predictions = predictions.argmax(dim=-1)  # (batch, seq)
+                
+                # Iterate through batch
+                for pred_seq, target_seq, mask_seq in zip(predictions, y_batch, mask_batch):
+                    pred_flat = []
+                    target_flat = []
+                    
+                    for p, t, m in zip(pred_seq, target_seq, mask_seq):
+                        if m:
+                            pred_flat.append(p.item())
+                            target_flat.append(t.item())
+                    
+                    if pred_flat:
+                        all_predictions.append(pred_flat)
+                        all_targets.append(target_flat)
+                        all_masks.append([True] * len(pred_flat))
+            else:
+                # CRF returns list of lists (one per sequence in batch)
+                for pred_seq, target_seq, mask_seq in zip(predictions, y_batch, mask_batch):
+                    pred_flat = []
+                    target_flat = []
+                    mask_flat = []
 
-                for p, t, m in zip(pred_seq, target_seq, mask_seq):
-                    if m:
-                        # Convert to int (should already be int from list, but be safe)
-                        p = int(p)
-                        t = int(t.item() if isinstance(t, torch.Tensor) else t)
-                        pred_flat.append(p)
-                        target_flat.append(t)
-                        mask_flat.append(True)
+                    for p, t, m in zip(pred_seq, target_seq, mask_seq):
+                        if m:
+                            pred_flat.append(p)
+                            target_flat.append(t.item())
+                            mask_flat.append(True)
 
-                if pred_flat:
-                    all_predictions.append(pred_flat)
-                    all_targets.append(target_flat)
-                    all_masks.append(mask_flat)
+                    if pred_flat:
+                        all_predictions.append(pred_flat)
+                        all_targets.append(target_flat)
+                        all_masks.append(mask_flat)
 
     # Calculate metrics (exclude spaces from accuracy like DER does)
     flat_predictions = []
@@ -429,12 +291,7 @@ def evaluate_model(model, dataloader, device, diacritic2id, model_name="bilstm_c
         for p, t, m in zip(pred_seq, target_seq, mask_seq):
             if m:  # Only non-padded positions
                 # Skip spaces (empty diacritic) for accuracy calculation
-                if t != diacritic2id['']:
-                    # Ensure p is int (in case it's a tensor)
-                    if isinstance(p, torch.Tensor):
-                        p = int(p.cpu().item())
-                    else:
-                        p = int(p)
+                if t != diacritic2id.get('', 0):
                     flat_predictions.append(p)
                     flat_targets.append(t)
 
@@ -501,18 +358,15 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
     print(f"Updated config with vocab_size: {config['vocab_size']}")
 
     # Prepare datasets
-    train_dataset = prepare_data(X_train, Y_train, lines_train, vocab, config, diacritic2id, embedder, model_name)
-    val_dataset = prepare_data(X_val, Y_val, lines_val, vocab, config, diacritic2id, embedder, model_name)
+    train_dataset = prepare_data(X_train, Y_train, lines_train, vocab, config, diacritic2id, embedder)
+    val_dataset = prepare_data(X_val, Y_val, lines_val, vocab, config, diacritic2id, embedder)
 
     # Create dataloaders
     # Note: batch_size should be reasonable when using contextual embeddings
     batch_size = DATA_CONFIG['batch_size'] if not config.get("use_contextual", False) else 1
     
     # Use custom collate function for contextual embeddings
-    if model_name.lower() in ["bilstm_dual", "bilstm_dual_crf"]:
-        collate_fn = collate_dual_pathway_batch
-    else:
-        collate_fn = collate_contextual_batch if config.get("use_contextual", False) else None
+    collate_fn = collate_contextual_batch if config.get("use_contextual", False) else None
     
     train_loader = DataLoader(
         train_dataset,
@@ -530,9 +384,6 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
     # Initialize model
     model = get_model(model_name, config)
     model.to(device)
-
-    # Loss criterion (for non-CRF models)
-    criterion = nn.CrossEntropyLoss(reduction='mean', ignore_index=0)  # ignore padding
 
     # Optimizer and scheduler
     optimizer = torch.optim.Adam(
@@ -562,45 +413,14 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
         train_steps = 0
 
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config['num_epochs']}")
-        for batch_data in progress_bar:
-            # Handle both standard and dual-pathway data formats
-            if model_name.lower() in ["bilstm_dual", "bilstm_dual_crf"]:
-                # Dual pathway: char_ids, word_embeddings, word_boundaries, y_batch, mask_batch
-                char_ids, word_embeddings, word_boundaries, y_batch, mask_batch = batch_data
-                char_ids = char_ids.to(device)
-                # Move word embeddings to device (they're a list)
-                word_embeddings = [emb.to(device) for emb in word_embeddings]
-                # Move word boundaries to device (they're a list)
-                word_boundaries = [wb.to(device) for wb in word_boundaries]
-                X_batch = (char_ids, word_embeddings, word_boundaries)
-            else:
-                # Standard: X_batch, y_batch, mask_batch
-                X_batch, y_batch, mask_batch = batch_data
-                X_batch = X_batch.to(device)
-            
+        for X_batch, y_batch, mask_batch in progress_bar:
+            X_batch = X_batch.to(device)
             y_batch = y_batch.to(device)
             mask_batch = mask_batch.to(device)
 
             optimizer.zero_grad()
 
-            # Forward pass
-            if model_name.lower() in ["bilstm_crf", "bilstm_dual_crf"]:
-                # CRF models: returns loss directly
-                loss = model(X_batch, tags=y_batch, mask=mask_batch)
-            else:
-                # Non-CRF models: get logits and compute loss
-                logits = model(X_batch, tags=None, mask=mask_batch)
-                # Reshape for loss computation: (batch*seq_len, num_classes)
-                batch_size, seq_len, num_classes = logits.shape
-                logits_flat = logits.view(-1, num_classes)
-                y_flat = y_batch.view(-1)
-                mask_flat = mask_batch.view(-1)
-                
-                # Compute loss only on non-padded positions
-                loss = criterion(logits_flat, y_flat)
-                if mask_flat.sum() > 0:
-                    loss = (loss * mask_flat.float()).sum() / mask_flat.float().sum()
-            
+            loss = model(X_batch, tags=y_batch, mask=mask_batch)
             loss.backward()
 
             # Gradient clipping
@@ -616,7 +436,7 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
         avg_train_loss = train_loss / train_steps
 
         # Validation
-        val_accuracy, val_der = evaluate_model(model, val_loader, device, diacritic2id, model_name)
+        val_accuracy, val_der = evaluate_model(model, val_loader, device, diacritic2id)
 
         print(f"Epoch {epoch+1}/{config['num_epochs']} | Train Loss: {avg_train_loss:.4f} | Val Accuracy: {val_accuracy:.4f} | DER: {val_der:.4f}")
 
@@ -658,7 +478,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Arabic Diacritization Models")
     parser.add_argument(
         "--model",
-        choices=["rnn", "lstm", "crf", "bilstm_crf", "bilstm_dual", "bilstm_dual_crf"],
+        choices=["rnn", "lstm", "crf", "bilstm_crf"],
         default="bilstm_crf",
         help="Model to train"
     )

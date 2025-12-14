@@ -1,34 +1,37 @@
 # -*- coding: utf-8 -*-
 """
-Arabic Diacritization Models with Dual-Pathway BiLSTM
+Arabic Diacritization Model with Bi-LSTM (Hierarchical - Word + Char Level)
 Compatible with the main training pipeline in train.py
 
-Models:
-- BiLSTMDualPathway: Char-level + Word-level BiLSTM with AraBERT
-- BiLSTMDualPathwayCRF: Same with CRF layer for sequence constraints
-
 Uses:
-- Same preprocessing as other models (from src/preprocessing/)
+- Separate Character-level BiLSTM encoder
+- Separate Word-level BiLSTM encoder  
+- Concatenation of both embeddings
+- Same preprocessing as original file
 - Same diacritic mapping (from utils/diacritic2id.pickle)
-- AraBERT embeddings for both character and word representations
+
+Architecture:
+- Character pathway: processes character-level embeddings
+- Word pathway: derives word-level context from character outputs
+- Concatenates both pathways
+- Classifier head outputs diacritics
+
+Note: This version is adapted for train.py pipeline compatibility.
+For exact original architecture, use 2bilstm_classifier.py standalone.
 """
 
 import torch
 import torch.nn as nn
 
 
-class BiLSTMDualPathway(nn.Module):
+class BiLSTMClassifier(nn.Module):
     """
-    Dual-pathway BiLSTM model for Arabic diacritization with word-level AraBERT.
+    Hierarchical BiLSTM model for Arabic diacritization
+    - Character-level BiLSTM: processes character embeddings
+    - Word-level BiLSTM: processes word-level context (from character outputs)
+    - Both embeddings concatenated for final classification
     
-    Architecture:
-    - Character-level BiLSTM: processes learned character embeddings (128-dim)
-    - Word-level BiLSTM: processes AraBERT embeddings (768-dim) at WORD level
-    - Expansion: word pathway output expanded to character level (like original design)
-    - Concatenation: combines both pathways at character level
-    - Classifier: outputs diacritic labels
-    
-    Matches the original 2bilstm_classifier.py design but uses AraBERT for words.
+    This is adapted from 2bilstm_classifier.py architecture to work with train.py
     """
     
     def __init__(
@@ -38,158 +41,161 @@ class BiLSTMDualPathway(nn.Module):
         embedding_dim=768,
         hidden_dim=256,
         char_emb_dim=128,
-        char_hidden_dim=256,
-        word_hidden_dim=256,
+        char_hidden_dim=128,
+        word_hidden_dim=128,
         dropout=0.3,
         use_contextual=False
     ):
         """
         Args:
-            vocab_size: Size of character vocabulary (for learned embeddings)
-            tagset_size: Number of diacritic classes (15)
-            embedding_dim: Dimension of word embeddings (768 for AraBERT)
-            hidden_dim: Not directly used, for compatibility
-            char_emb_dim: Embedding dimension for character level (128)
-            char_hidden_dim: Hidden dimension of character-level BiLSTM (256)
-            word_hidden_dim: Hidden dimension of word-level BiLSTM (256)
+            vocab_size: Size of character vocabulary
+            tagset_size: Number of diacritic classes
+            embedding_dim: Dimension of input embeddings (768 for AraBERT, or char embedding size)
+            hidden_dim: Hidden dimension (used for word pathway)
+            char_emb_dim: Character embedding dimension (if not using contextual)
+            char_hidden_dim: Character BiLSTM hidden dimension
+            word_hidden_dim: Word BiLSTM hidden dimension
             dropout: Dropout rate
-            use_contextual: Should be True for this model
+            use_contextual: Whether using contextual embeddings (AraBERT)
         """
         super().__init__()
         
         self.vocab_size = vocab_size
         self.tagset_size = tagset_size
         self.embedding_dim = embedding_dim
-        self.char_emb_dim = char_emb_dim
+        self.hidden_dim = hidden_dim
         self.use_contextual = use_contextual
         
-        # Character embedding layer (learned, not AraBERT)
-        self.char_embedding = nn.Embedding(vocab_size, char_emb_dim, padding_idx=0)
+        # Input embedding layer (only if not using contextual embeddings)
+        if not use_contextual:
+            self.embedding = nn.Embedding(vocab_size, char_emb_dim, padding_idx=0)
+            input_dim = char_emb_dim
+        else:
+            # When using contextual embeddings (AraBERT), input_dim is embedding_dim (768)
+            input_dim = embedding_dim
         
-        # Character-level BiLSTM pathway
-        # Input: learned character embeddings (128-dim)
+        # ========================
+        # CHARACTER-LEVEL PATHWAY
+        # ========================
+        # Processes character embeddings
         self.char_bilstm = nn.LSTM(
-            input_size=char_emb_dim,
+            input_size=input_dim,
             hidden_size=char_hidden_dim,
-            num_layers=2,
+            num_layers=1,
             batch_first=True,
             bidirectional=True,
-            dropout=dropout if 2 > 1 else 0.0
+            dropout=0.0
         )
+        char_output_dim = char_hidden_dim * 2  # 256 with bidirectional
         
-        # Word-level BiLSTM pathway
-        # Input: AraBERT embeddings (768-dim) at WORD level
+        # ========================
+        # WORD-LEVEL PATHWAY
+        # ========================
+        # Processes character outputs to derive word-level context
         self.word_bilstm = nn.LSTM(
-            input_size=embedding_dim,  # AraBERT: 768-dim
+            input_size=char_output_dim,
             hidden_size=word_hidden_dim,
-            num_layers=2,
+            num_layers=1,
             batch_first=True,
             bidirectional=True,
-            dropout=dropout if 2 > 1 else 0.0
+            dropout=0.0
         )
+        word_output_dim = word_hidden_dim * 2  # 256 with bidirectional
         
-        # Combine both pathways
-        self.char_out_dim = char_hidden_dim * 2  # 512
-        self.word_out_dim = word_hidden_dim * 2  # 512
-        combined_dim = self.char_out_dim + self.word_out_dim  # 1024
+        # ========================
+        # CONCATENATION & CLASSIFICATION
+        # ========================
+        # Combined dimension: character + word embeddings
+        combined_dim = char_output_dim + word_output_dim
         
-        # Classifier head (from original)
         self.classifier = nn.Sequential(
-            nn.Linear(combined_dim, combined_dim // 2),  # 1024 -> 512
+            nn.Linear(combined_dim, combined_dim // 2),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(combined_dim // 2, tagset_size)  # 512 -> 15
+            nn.Linear(combined_dim // 2, tagset_size)
         )
     
-    def forward(self, X, tags=None, mask=None):
+    def forward(self, X, mask=None, tags=None):
         """
         Forward pass
         
         Args:
-            X: Tuple of (char_ids, word_embeddings, word_boundaries)
-               char_ids: Character IDs (batch, seq_len) - for learned embeddings
-               word_embeddings: List of AraBERT embeddings [(num_words_0, 768), ...]
-               word_boundaries: List of word boundaries per sample
-            tags: Not used (for compatibility with train.py)
-            mask: Optional mask tensor for padding
+            X: Input tensor of shape (batch_size, seq_len, embedding_dim) for contextual
+               or (batch_size, seq_len) for non-contextual
+            mask: Optional mask tensor of shape (batch_size, seq_len) for padding
+            tags: Optional target labels for computing loss (for training)
         
         Returns:
-            logits: Output logits of shape (batch_size, seq_len, tagset_size)
+            If tags is provided: Scalar loss
+            If tags is None: logits of shape (batch_size, seq_len, tagset_size)
         """
         
-        # Handle tuple input
-        if isinstance(X, (tuple, list)) and len(X) == 3:
-            char_ids, word_embeddings, word_boundaries = X
-        else:
-            raise ValueError("X must be a tuple of (char_ids, word_embeddings, word_boundaries)")
+        # Handle both contextual and non-contextual inputs
+        if not self.use_contextual:
+            # X is token IDs, need to embed
+            if X.dim() == 2:
+                X = self.embedding(X)  # (batch, seq_len, char_emb_dim)
         
-        batch_size = char_ids.size(0)
-        char_seq_len = char_ids.size(1)
+        batch_size, seq_len, _ = X.shape
         
-        # CHARACTER PATHWAY: embed char IDs and process
-        char_emb = self.char_embedding(char_ids)  # (batch, seq_len, 128)
-        char_out, _ = self.char_bilstm(char_emb)  # (batch, seq_len, 512)
+        # ========================
+        # CHARACTER-LEVEL PATHWAY
+        # ========================
+        # Process embeddings through character-level BiLSTM
+        # Input: (batch, seq_len, input_dim)
+        # Output: (batch, seq_len, char_output_dim)
+        char_out, _ = self.char_bilstm(X)
         
-        # WORD PATHWAY: process word-level AraBERT embeddings
-        # word_embeddings is a list of (num_words_i, 768) tensors
-        # We need to process each sample in the batch separately because they have different word counts
-        word_out_expanded_list = []
+        # ========================
+        # WORD-LEVEL PATHWAY
+        # ========================
+        # Derive word-level context from character outputs
+        # Input: (batch, seq_len, char_output_dim)
+        # Output: (batch, seq_len, word_output_dim)
+        word_out, _ = self.word_bilstm(char_out)
         
-        for b in range(batch_size):
-            word_emb = word_embeddings[b]  # (num_words, 768)
-            word_boundary = word_boundaries[b]  # List of word lengths
-            
-            if len(word_emb) == 0:
-                # No words in this sample (edge case)
-                word_out_expanded = torch.zeros(
-                    char_seq_len, self.word_out_dim, 
-                    device=char_out.device, dtype=char_out.dtype
-                )
-            else:
-                # Process words through word BiLSTM
-                word_emb_unsqueezed = word_emb.unsqueeze(0)  # (1, num_words, 768)
-                word_out_lstm, _ = self.word_bilstm(word_emb_unsqueezed)  # (1, num_words, 512)
-                word_out_lstm = word_out_lstm.squeeze(0)  # (num_words, 512)
-                
-                # Expand word output to character level (like original .repeat() logic)
-                # Each word embedding is repeated for each character in that word
-                word_out_expanded = []
-                for w_idx, (word_out_vec, num_chars) in enumerate(zip(word_out_lstm, word_boundary)):
-                    # Repeat each word vector num_chars times
-                    repeated = word_out_vec.unsqueeze(0).repeat(num_chars, 1)  # (num_chars, 512)
-                    word_out_expanded.append(repeated)
-                
-                word_out_expanded = torch.cat(word_out_expanded, dim=0)  # (total_chars, 512)
-                
-                # Pad to match char_seq_len if needed (shouldn't be needed if data is aligned)
-                if word_out_expanded.size(0) < char_seq_len:
-                    pad_len = char_seq_len - word_out_expanded.size(0)
-                    padding = torch.zeros(pad_len, self.word_out_dim, 
-                                        device=word_out_expanded.device, dtype=word_out_expanded.dtype)
-                    word_out_expanded = torch.cat([word_out_expanded, padding], dim=0)
-                elif word_out_expanded.size(0) > char_seq_len:
-                    word_out_expanded = word_out_expanded[:char_seq_len]
-            
-            word_out_expanded_list.append(word_out_expanded)
+        # ========================
+        # CONCATENATION
+        # ========================
+        # Concatenate character and word embeddings
+        # char_out: (batch, seq_len, char_output_dim)
+        # word_out: (batch, seq_len, word_output_dim)
+        # combined: (batch, seq_len, combined_dim)
+        combined = torch.cat([char_out, word_out], dim=-1)
         
-        # Stack all word outputs
-        word_out_expanded = torch.stack(word_out_expanded_list, dim=0)  # (batch, seq_len, 512)
-        
-        # Concatenate both pathways at character level
-        combined = torch.cat([char_out, word_out_expanded], dim=-1)  # (batch, seq_len, 1024)
-        
-        # Classifier head
+        # ========================
+        # CLASSIFICATION
+        # ========================
+        # Pass concatenated embeddings through classifier
         logits = self.classifier(combined)  # (batch, seq_len, tagset_size)
         
-        return logits
+        # If tags provided, compute loss (for training)
+        if tags is not None:
+            # Flatten for loss computation
+            logits_flat = logits.view(-1, self.tagset_size)
+            tags_flat = tags.view(-1)
+            
+            # Create mask for padding
+            if mask is not None:
+                mask_flat = mask.view(-1).float()
+            else:
+                mask_flat = torch.ones(tags_flat.shape[0], device=tags_flat.device)
+            
+            # CrossEntropyLoss
+            loss_fn = nn.CrossEntropyLoss(reduction='none')
+            loss_per_token = loss_fn(logits_flat, tags_flat)
+            loss = (loss_per_token * mask_flat).sum() / mask_flat.sum().clamp(min=1.0)
+            
+            return loss
+        else:
+            # Return logits for inference
+            return logits
 
 
-class BiLSTMDualPathwayCRF(nn.Module):
+class BiLSTMCRFClassifier(nn.Module):
     """
-    Dual-pathway BiLSTM + CRF model for Arabic diacritization using AraBERT.
-    
-    Extends BiLSTMDualPathway with CRF layer for sequence labeling constraints.
-    Better accuracy for structured prediction tasks.
+    Hierarchical BiLSTM + CRF model for Arabic diacritization
+    Extends BiLSTMClassifier with CRF layer for sequence labeling constraints
     """
     
     def __init__(
@@ -198,22 +204,22 @@ class BiLSTMDualPathwayCRF(nn.Module):
         tagset_size,
         embedding_dim=768,
         hidden_dim=256,
-        char_hidden_dim=256,
-        word_hidden_dim=256,
+        char_emb_dim=128,
+        char_hidden_dim=128,
         dropout=0.3,
         use_contextual=False,
         use_crf=True
     ):
         super().__init__()
         
-        # Dual-pathway BiLSTM component
-        self.bilstm = BiLSTMDualPathway(
+        # BiLSTM component
+        self.bilstm = BiLSTMClassifier(
             vocab_size=vocab_size,
             tagset_size=tagset_size,
             embedding_dim=embedding_dim,
             hidden_dim=hidden_dim,
+            char_emb_dim=char_emb_dim,
             char_hidden_dim=char_hidden_dim,
-            word_hidden_dim=word_hidden_dim,
             dropout=dropout,
             use_contextual=use_contextual
         )
@@ -232,24 +238,17 @@ class BiLSTMDualPathwayCRF(nn.Module):
         Forward pass
         
         Args:
-            X: Tuple of (char_ids, word_embeddings, word_boundaries)
+            X: Input tensor
             tags: Optional target labels for CRF loss computation
             mask: Optional mask tensor for padding
         
         Returns:
-            If tags is provided: CRF loss (or logits if CRF disabled)
-            If tags is None: CRF viterbi path predictions (or logits if CRF disabled)
+            If tags is provided: CRF loss
+            If tags is None: CRF viterbi path predictions
         """
         
-        # Handle tuple input - pass all 3 components
-        if isinstance(X, (tuple, list)) and len(X) >= 3:
-            # X already has (char_ids, word_embeddings, word_boundaries)
-            pass
-        else:
-            raise ValueError("X must be a tuple of (char_ids, word_embeddings, word_boundaries)")
-        
         # Get BiLSTM logits
-        logits = self.bilstm(X, tags=None, mask=mask)  # (batch, seq_len, tagset_size)
+        logits = self.bilstm(X, mask=mask)  # (batch, seq_len, tagset_size)
         
         if not self.use_crf:
             return logits

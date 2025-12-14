@@ -32,7 +32,7 @@ RNN_CONFIG = {
     "bidirectional": False,
     "learning_rate": 0.001,
     "weight_decay": 1e-5,
-    "num_epochs": 20,
+    "num_epochs": 50,
     "patience": 5,  # Early stopping patience
     "gradient_clip": 5.0
 }
@@ -50,7 +50,7 @@ LSTM_CONFIG = {
     "bidirectional": False,
     "learning_rate": 0.001,
     "weight_decay": 1e-5,
-    "num_epochs": 20,
+    "num_epochs": 50,
     "patience": 5,
     "gradient_clip": 5.0
 }
@@ -67,7 +67,7 @@ CRF_CONFIG = {
     "dropout": 0.2,
     "learning_rate": 0.01,
     "weight_decay": 1e-4,
-    "num_epochs": 20,
+    "num_epochs": 30,
     "patience": 5,
     "gradient_clip": 1.0,
     "use_crf": True
@@ -86,7 +86,7 @@ BILSTM_CRF_CONFIG = {
     "dropout": 0.3,
     "learning_rate": 0.001,
     "weight_decay": 1e-5,
-    "num_epochs": 20,
+    "num_epochs": 50,
     "patience": 7,
     "gradient_clip": 5.0,
     "use_crf": True,
@@ -94,49 +94,47 @@ BILSTM_CRF_CONFIG = {
 }
 
 # ======================================================
-# BiLSTM Dual-Pathway Model Configuration
+# BiLSTM Classifier Configuration (Dual-Pathway)
 # ======================================================
 
-BILSTM_DUAL_CONFIG = {
+BILSTM_CLASSIFIER_CONFIG = {
     "vocab_size": None,  # Will be set dynamically based on data
     "tagset_size": NUM_DIACRITIC_CLASSES,
-    "embedding_dim": 768,  # AraBERT hidden size
-    "hidden_dim": 256,
-    "char_emb_dim": 128,  # Learned character embeddings
-    "char_hidden_dim": 256,
-    "word_hidden_dim": 256,
-    "num_layers": 2,
+    "embedding_dim": 768,  # AraBERT hidden size when using contextual
+    "hidden_dim": 256,  # Not directly used, for compatibility
+    "char_emb_dim": 128,  # Character embedding dimension (if not contextual)
+    "char_hidden_dim": 128,  # Character BiLSTM hidden dimension
+    "word_hidden_dim": 128,  # Word BiLSTM hidden dimension
     "dropout": 0.3,
     "learning_rate": 0.001,
     "weight_decay": 1e-5,
-    "num_epochs": 12,
+    "num_epochs": 10,
     "patience": 7,
     "gradient_clip": 5.0,
-    "use_crf": False,  # No CRF for basic dual pathway
-    "use_contextual": True  # Use AraBERT for word-level
+    "use_crf": False,  # No CRF in this variant
+    "use_contextual": True  # Use AraBERT embeddings
 }
 
 # ======================================================
-# BiLSTM Dual-Pathway + CRF Model Configuration
+# BiLSTM Classifier + CRF Configuration (Dual-Pathway with CRF)
 # ======================================================
 
-BILSTM_DUAL_CRF_CONFIG = {
+BILSTM_CLASSIFIER_CRF_CONFIG = {
     "vocab_size": None,  # Will be set dynamically based on data
     "tagset_size": NUM_DIACRITIC_CLASSES,
-    "embedding_dim": 768,  # AraBERT hidden size
-    "hidden_dim": 256,
-    "char_emb_dim": 128,  # Learned character embeddings
-    "char_hidden_dim": 256,
-    "word_hidden_dim": 256,
-    "num_layers": 2,
+    "embedding_dim": 768,  # AraBERT hidden size when using contextual
+    "hidden_dim": 256,  # Not directly used, for compatibility
+    "char_emb_dim": 128,  # Character embedding dimension (if not contextual)
+    "char_hidden_dim": 128,  # Character BiLSTM hidden dimension
+    "word_hidden_dim": 128,  # Word BiLSTM hidden dimension
     "dropout": 0.3,
     "learning_rate": 0.001,
     "weight_decay": 1e-5,
-    "num_epochs": 20,
+    "num_epochs": 50,
     "patience": 7,
     "gradient_clip": 5.0,
-    "use_crf": True,  # With CRF for better sequence prediction
-    "use_contextual": True  # Use AraBERT for word-level
+    "use_crf": True,  # WITH CRF in this variant
+    "use_contextual": True  # Use AraBERT embeddings
 }
 
 # ======================================================
@@ -220,8 +218,8 @@ def get_model_config(model_name: str):
         "lstm": LSTM_CONFIG,
         "crf": CRF_CONFIG,
         "bilstm_crf": BILSTM_CRF_CONFIG,
-        "bilstm_dual": BILSTM_DUAL_CONFIG,
-        "bilstm_dual_crf": BILSTM_DUAL_CRF_CONFIG
+        "bilstm_classifier": BILSTM_CLASSIFIER_CONFIG,
+        "bilstm_classifier_crf": BILSTM_CLASSIFIER_CRF_CONFIG
     }
     return configs.get(model_name.lower())
 
