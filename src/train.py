@@ -114,7 +114,6 @@ from src.features.contextual_embeddings import ContextualEmbedder
 
 # Import models
 from src.models.bilstm_crf import BiLSTMCRF
-from src.models.bilstm_classifier import BiLSTMClassifier, BiLSTMCRFClassifier
 # TODO: Import other models when implemented
 # from src.models.rnn import RNNModel
 # from src.models.lstm import LSTMModel
@@ -166,10 +165,8 @@ def prepare_data(X, Y, lines, vocab, config, diacritic2id, embedder=None):
 
 def get_model(model_name, config):
     """Initialize the specified model"""
-    model_name = model_name.lower()
-    
-    if model_name == "bilstm_crf":
-        # Original BiLSTM-CRF model
+    if model_name.lower() == "bilstm_crf":
+        # Filter config to only include parameters that BiLSTMCRF accepts
         model_config = {
             "vocab_size": config["vocab_size"],
             "tagset_size": config["tagset_size"],
@@ -178,48 +175,8 @@ def get_model(model_name, config):
             "use_contextual": config.get("use_contextual", False)
         }
         model = BiLSTMCRF(**model_config)
-    
-    elif model_name == "bilstm_classifier":
-        # EXACT original architecture (98% accuracy)
-        model_config = {
-            "n_chars": config["n_chars"],
-            "n_words": config["n_words"],
-            "char_emb_dim": config.get("char_emb_dim", 64),
-            "word_emb_dim": config.get("word_emb_dim", 128),
-            "char_hidden": config.get("char_hidden", 128),
-            "word_hidden": config.get("word_hidden", 128),
-            "char_pad_id": config.get("char_pad_id", 0),
-            "word_pad_id": config.get("word_pad_id", 0),
-            "out_classes": config["out_classes"],
-            "dropout": config.get("dropout", 0.3),
-            # Train.py compatibility
-            "vocab_size": config.get("vocab_size"),
-            "tagset_size": config.get("out_classes"),
-            "embedding_dim": 768,
-            "hidden_dim": 256,
-            "use_contextual": config.get("use_contextual", False)
-        }
-        model = BiLSTMClassifier(**model_config)
-    
-    elif model_name == "bilstm_classifier_crf":
-        # Original architecture + CRF
-        model_config = {
-            "n_chars": config["n_chars"],
-            "n_words": config["n_words"],
-            "char_emb_dim": config.get("char_emb_dim", 64),
-            "word_emb_dim": config.get("word_emb_dim", 128),
-            "char_hidden": config.get("char_hidden", 128),
-            "word_hidden": config.get("word_hidden", 128),
-            "char_pad_id": config.get("char_pad_id", 0),
-            "word_pad_id": config.get("word_pad_id", 0),
-            "out_classes": config["out_classes"],
-            "dropout": config.get("dropout", 0.3),
-            "use_crf": True
-        }
-        model = BiLSTMCRFClassifier(**model_config)
-    
     else:
-        raise ValueError(f"Model '{model_name}' not implemented. Available: bilstm_crf, bilstm_classifier, bilstm_classifier_crf")
+        raise ValueError(f"Model {model_name} not implemented yet")
 
     return model
 
@@ -253,43 +210,23 @@ def evaluate_model(model, dataloader, device, diacritic2id):
 
             predictions = model(X_batch, mask=mask_batch)
 
-            # Check if predictions are logits (from BiLSTMClassifier) or viterbi paths (from CRF)
-            if isinstance(predictions, torch.Tensor):
-                # BiLSTMClassifier returns logits: (batch, seq, num_classes)
-                # Convert to class indices
-                predictions = predictions.argmax(dim=-1)  # (batch, seq)
-                
-                # Iterate through batch
-                for pred_seq, target_seq, mask_seq in zip(predictions, y_batch, mask_batch):
-                    pred_flat = []
-                    target_flat = []
-                    
-                    for p, t, m in zip(pred_seq, target_seq, mask_seq):
-                        if m:
-                            pred_flat.append(p.item())
-                            target_flat.append(t.item())
-                    
-                    if pred_flat:
-                        all_predictions.append(pred_flat)
-                        all_targets.append(target_flat)
-                        all_masks.append([True] * len(pred_flat))
-            else:
-                # CRF returns list of lists (one per sequence in batch)
-                for pred_seq, target_seq, mask_seq in zip(predictions, y_batch, mask_batch):
-                    pred_flat = []
-                    target_flat = []
-                    mask_flat = []
+            # predictions is a list of lists (one per sequence in batch)
+            # y_batch is tensor, mask_batch is tensor
+            for pred_seq, target_seq, mask_seq in zip(predictions, y_batch, mask_batch):
+                pred_flat = []
+                target_flat = []
+                mask_flat = []
 
-                    for p, t, m in zip(pred_seq, target_seq, mask_seq):
-                        if m:
-                            pred_flat.append(p)
-                            target_flat.append(t.item())
-                            mask_flat.append(True)
+                for p, t, m in zip(pred_seq, target_seq, mask_seq):
+                    if m:
+                        pred_flat.append(p)
+                        target_flat.append(t.item())
+                        mask_flat.append(True)
 
-                    if pred_flat:
-                        all_predictions.append(pred_flat)
-                        all_targets.append(target_flat)
-                        all_masks.append(mask_flat)
+                if pred_flat:
+                    all_predictions.append(pred_flat)
+                    all_targets.append(target_flat)
+                    all_masks.append(mask_flat)
 
     # Calculate metrics (exclude spaces from accuracy like DER does)
     flat_predictions = []
@@ -299,7 +236,7 @@ def evaluate_model(model, dataloader, device, diacritic2id):
         for p, t, m in zip(pred_seq, target_seq, mask_seq):
             if m:  # Only non-padded positions
                 # Skip spaces (empty diacritic) for accuracy calculation
-                if t != diacritic2id.get('', 0):
+                if t != diacritic2id['']:
                     flat_predictions.append(p)
                     flat_targets.append(t)
 
@@ -362,14 +299,8 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
 
     # Update vocab size in config
     config = update_vocab_size(config.copy(), len(vocab.char2id))
-    
-    # Set padding IDs for BiLSTMClassifier
-    if "<PAD>" in vocab.char2id:
-        config["char_pad_id"] = vocab.char2id["<PAD>"]
-        config["word_pad_id"] = vocab.char2id["<PAD>"]
-    
-    print(f"Updated config with vocab_size: {config['vocab_size']}")
 
+    print(f"Updated config with vocab_size: {config['vocab_size']}")
 
     # Prepare datasets
     train_dataset = prepare_data(X_train, Y_train, lines_train, vocab, config, diacritic2id, embedder)
@@ -492,7 +423,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Arabic Diacritization Models")
     parser.add_argument(
         "--model",
-        choices=["rnn", "lstm", "crf", "bilstm_crf", "bilstm_classifier", "bilstm_classifier_crf"],
+        choices=["rnn", "lstm", "crf", "bilstm_crf"],
         default="bilstm_crf",
         help="Model to train"
     )
