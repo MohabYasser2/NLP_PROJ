@@ -79,7 +79,7 @@ class ContextualConfig:
     max_length: int = 256  # transformer max tokens
     agg: str = "last4_mean"  # "last", "last4_mean"
     strip_tashkeel: bool = True
-    cache_dir: Optional[str] = "data/processed/contextual_cache"
+    cache_dir: Optional[str] = None  # Set to None to disable caching (saves disk space on Kaggle)
     batch_size: int = 8  # batching lines when using embed_corpus
     fp16: bool = False  # if cuda + supports, can speed up
 
