@@ -162,18 +162,29 @@ class BiLSTMClassifier(nn.Module):
             nn.Linear(combined_dim // 2, out_classes)
         )
     
-    def forward(self, char_ids, word_ids=None):
+    def forward(self, char_ids, word_ids=None, tags=None, mask=None):
         """
         DUAL MODE:
         
         Mode 1 (Original): forward(char_ids[B,S,W], word_ids[B,S])
             Returns [B, S, W, out_classes]
         
-        Mode 2 (Train.py): forward(embeddings[B,S,D], None)
-            Automatically derives character and word features from embeddings
-            Returns [B, S, out_classes]
+        Mode 2 (Train.py): forward(X[B,S,D], tags=y[B,S], mask=mask[B,S])
+            Returns loss (scalar) for training
         """
         
+        # Compute logits
+        logits = self._compute_logits(char_ids, word_ids)
+        
+        # If tags provided, compute loss (training mode)
+        if tags is not None:
+            return self._compute_loss(logits, tags, mask)
+        
+        # Otherwise return logits (inference mode)
+        return logits
+    
+    def _compute_logits(self, char_ids, word_ids=None):
+        """Compute logits from inputs"""
         # Check if word_ids is None and char_ids is 3D with last dim not matching vocab
         if word_ids is None and char_ids.dim() == 3:
             B, S, D = char_ids.shape
@@ -227,6 +238,33 @@ class BiLSTMClassifier(nn.Module):
         logits = self.classifier(combined)  # [B, S, out_classes]
         
         return logits
+    
+    def _compute_loss(self, logits, tags, mask):
+        """Compute masked cross-entropy loss"""
+        # logits: [B, S, out_classes]
+        # tags: [B, S]
+        # mask: [B, S]
+        
+        B, S, C = logits.shape
+        
+        # Flatten for loss computation
+        logits_flat = logits.view(B * S, C)
+        tags_flat = tags.view(B * S)
+        
+        # Create mask
+        if mask is not None:
+            mask_flat = mask.view(B * S).float()
+        else:
+            mask_flat = torch.ones(B * S, device=tags_flat.device, dtype=torch.float)
+        
+        # Cross-entropy loss
+        loss_fn = nn.CrossEntropyLoss(reduction='none')
+        loss_per_token = loss_fn(logits_flat, tags_flat)
+        
+        # Apply mask and compute mean
+        loss = (loss_per_token * mask_flat).sum() / mask_flat.sum().clamp(min=1.0)
+        
+        return loss
 
 
 class BiLSTMCRFClassifier(nn.Module):
