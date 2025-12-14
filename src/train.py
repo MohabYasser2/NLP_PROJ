@@ -208,22 +208,31 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
         raise ValueError(f"Unknown model: {model_name}")
 
     print(f"Training {model_name.upper()} model with seed {seed}")
-    print(f"Config: {config}")
+    print(f"Embedding: {'AraBERT (768-dim)' if config.get('use_contextual') else 'Character (100-dim)'}")
+    print(f"CRF: {'Enabled' if config.get('use_crf') else 'Disabled'}")
 
     # Set device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    print(f"Device: {device}")
+    if device.type == "cuda":
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+        print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
 
     # Load data
+    print("\nLoading data...")
     X_train, Y_train, lines_train, X_val, Y_val, lines_val = load_data(train_path, val_path, max_samples)
+    print(f"✓ Loaded {len(X_train)} training samples")
+    print(f"✓ Loaded {len(X_val)} validation samples")
 
     # Load diacritic mapping from pickle file (single source of truth)
     with open("utils/diacritic2id.pickle", "rb") as f:
         diacritic2id = pickle.load(f)
+    print(f"✓ Loaded {len(diacritic2id)} diacritic classes")
 
     # Initialize embedder if using contextual embeddings
     embedder = None
     if config.get("use_contextual", False):
+        print("\nInitializing AraBERT embedder...")
         embedder = ContextualEmbedder(
             model_name="aubmindlab/bert-base-arabertv02",
             device=device.type,
@@ -231,10 +240,13 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
         )
         # Update embedding_dim for contextual
         config["embedding_dim"] = embedder.hidden_size
+        print(f"✓ AraBERT loaded (hidden_size={embedder.hidden_size})")
 
     # Build vocabulary from training data ONLY (no data leakage)
+    print("\nBuilding vocabulary...")
     vocab = CharVocab()
     vocab.build(X_train)
+    print(f"✓ Vocabulary size: {len(vocab.char2id)}")
 
     # Update vocab size in config
     config = update_vocab_size(config.copy(), len(vocab.char2id))
@@ -317,7 +329,7 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
         # Validation
         val_accuracy, val_der = evaluate_model(model, val_loader, device, diacritic2id)
 
-        print(f"Epoch {epoch+1} - Train Loss: {avg_train_loss:.4f}, Val Accuracy: {val_accuracy:.4f}, Val DER: {val_der:.4f}")
+        print(f"Epoch {epoch+1}/{config['num_epochs']} | Train Loss: {avg_train_loss:.4f} | Val Accuracy: {val_accuracy:.4f} | DER: {val_der:.4f}")
 
         # Learning rate scheduling
         if scheduler:
@@ -338,15 +350,19 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
                 'vocab': vocab.char2id
             }
             torch.save(checkpoint, f"models/best_{model_name}.pth")
-            print(f"Saved checkpoint at epoch {epoch+1} with DER {best_der:.4f}")
+            print(f"  ✓ New best model! DER: {best_der:.4f} (saved at epoch {epoch+1})")
         else:
             patience_counter += 1
             if patience_counter >= patience:
-                print(f"Early stopping at epoch {epoch+1}")
+                print(f"\n⚠ Early stopping triggered at epoch {epoch+1} (no improvement for {patience} epochs)")
                 break
 
-    print("Training completed!")
+    print("\n" + "="*70)
+    print("✓ TRAINING COMPLETED!")
+    print("="*70)
     print(f"Best DER: {best_der:.4f}")
+    print(f"Model saved to: models/best_{model_name}.pth")
+    print("="*70)
 
 
 if __name__ == "__main__":
