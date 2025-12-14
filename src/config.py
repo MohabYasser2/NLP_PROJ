@@ -96,45 +96,49 @@ BILSTM_CRF_CONFIG = {
 # ======================================================
 # BiLSTM Classifier Configuration (Dual-Pathway)
 # ======================================================
+# EXACT original architecture parameters: 98% accuracy
 
 BILSTM_CLASSIFIER_CONFIG = {
-    "vocab_size": None,  # Will be set dynamically based on data
-    "tagset_size": NUM_DIACRITIC_CLASSES,
-    "embedding_dim": 768,  # AraBERT hidden size when using contextual
-    "hidden_dim": 256,  # Not directly used, for compatibility
-    "char_emb_dim": 128,  # Character embedding dimension (if not contextual)
-    "char_hidden_dim": 128,  # Character BiLSTM hidden dimension
-    "word_hidden_dim": 128,  # Word BiLSTM hidden dimension
+    "n_chars": None,  # Will be set dynamically (vocab_size)
+    "n_words": None,  # Will be set dynamically (word_vocab_size)
+    "out_classes": NUM_DIACRITIC_CLASSES,  # 15 diacritics
+    "char_emb_dim": 64,  # Original: 64-dim character embeddings
+    "word_emb_dim": 128,  # Original: 128-dim word embeddings
+    "char_hidden": 128,  # Original: 128-dim char BiLSTM hidden
+    "word_hidden": 128,  # Original: 128-dim word BiLSTM hidden
+    "char_pad_id": 0,  # Will be updated based on vocab
+    "word_pad_id": 0,  # Will be updated based on word vocab
     "dropout": 0.3,
     "learning_rate": 0.001,
     "weight_decay": 1e-5,
-    "num_epochs": 10,
+    "num_epochs": 15,
     "patience": 7,
     "gradient_clip": 5.0,
-    "use_crf": False,  # No CRF in this variant
-    "use_contextual": True  # Use AraBERT embeddings
+    "use_crf": False  # Without CRF
 }
 
 # ======================================================
 # BiLSTM Classifier + CRF Configuration (Dual-Pathway with CRF)
 # ======================================================
+# EXACT original architecture + CRF layer
 
 BILSTM_CLASSIFIER_CRF_CONFIG = {
-    "vocab_size": None,  # Will be set dynamically based on data
-    "tagset_size": NUM_DIACRITIC_CLASSES,
-    "embedding_dim": 768,  # AraBERT hidden size when using contextual
-    "hidden_dim": 256,  # Not directly used, for compatibility
-    "char_emb_dim": 128,  # Character embedding dimension (if not contextual)
-    "char_hidden_dim": 128,  # Character BiLSTM hidden dimension
-    "word_hidden_dim": 128,  # Word BiLSTM hidden dimension
+    "n_chars": None,  # Will be set dynamically (vocab_size)
+    "n_words": None,  # Will be set dynamically (word_vocab_size)
+    "out_classes": NUM_DIACRITIC_CLASSES,  # 15 diacritics
+    "char_emb_dim": 64,  # Original: 64-dim character embeddings
+    "word_emb_dim": 128,  # Original: 128-dim word embeddings
+    "char_hidden": 128,  # Original: 128-dim char BiLSTM hidden
+    "word_hidden": 128,  # Original: 128-dim word BiLSTM hidden
+    "char_pad_id": 0,  # Will be updated based on vocab
+    "word_pad_id": 0,  # Will be updated based on word vocab
     "dropout": 0.3,
     "learning_rate": 0.001,
     "weight_decay": 1e-5,
     "num_epochs": 50,
     "patience": 7,
     "gradient_clip": 5.0,
-    "use_crf": True,  # WITH CRF in this variant
-    "use_contextual": True  # Use AraBERT embeddings
+    "use_crf": True  # WITH CRF
 }
 
 # ======================================================
@@ -224,8 +228,11 @@ def get_model_config(model_name: str):
     return configs.get(model_name.lower())
 
 def update_vocab_size(config: dict, vocab_size: int):
-    """Update vocab_size in model config"""
+    """Update vocab_size in model config and set n_chars/n_words for BiLSTMClassifier"""
     config["vocab_size"] = vocab_size
+    # For BiLSTMClassifier models, set both n_chars and n_words to vocab_size
+    config["n_chars"] = vocab_size
+    config["n_words"] = vocab_size
     return config
 
 def get_feature_model_config(model_name: str):

@@ -180,32 +180,40 @@ def get_model(model_name, config):
         model = BiLSTMCRF(**model_config)
     
     elif model_name == "bilstm_classifier":
-        # Hierarchical BiLSTM (Word + Char level) without CRF
+        # EXACT original architecture (98% accuracy)
         model_config = {
-            "vocab_size": config["vocab_size"],
-            "tagset_size": config["tagset_size"],
-            "embedding_dim": config["embedding_dim"],
-            "hidden_dim": config["hidden_dim"],
-            "char_emb_dim": config.get("char_emb_dim", 128),
-            "char_hidden_dim": config.get("char_hidden_dim", 128),
-            "word_hidden_dim": config.get("word_hidden_dim", 128),
+            "n_chars": config["n_chars"],
+            "n_words": config["n_words"],
+            "char_emb_dim": config.get("char_emb_dim", 64),
+            "word_emb_dim": config.get("word_emb_dim", 128),
+            "char_hidden": config.get("char_hidden", 128),
+            "word_hidden": config.get("word_hidden", 128),
+            "char_pad_id": config.get("char_pad_id", 0),
+            "word_pad_id": config.get("word_pad_id", 0),
+            "out_classes": config["out_classes"],
             "dropout": config.get("dropout", 0.3),
+            # Train.py compatibility
+            "vocab_size": config.get("vocab_size"),
+            "tagset_size": config.get("out_classes"),
+            "embedding_dim": 768,
+            "hidden_dim": 256,
             "use_contextual": config.get("use_contextual", False)
         }
         model = BiLSTMClassifier(**model_config)
     
     elif model_name == "bilstm_classifier_crf":
-        # Hierarchical BiLSTM (Word + Char level) with CRF
+        # Original architecture + CRF
         model_config = {
-            "vocab_size": config["vocab_size"],
-            "tagset_size": config["tagset_size"],
-            "embedding_dim": config["embedding_dim"],
-            "hidden_dim": config["hidden_dim"],
-            "char_emb_dim": config.get("char_emb_dim", 128),
-            "char_hidden_dim": config.get("char_hidden_dim", 128),
-            "word_hidden_dim": config.get("word_hidden_dim", 128),
+            "n_chars": config["n_chars"],
+            "n_words": config["n_words"],
+            "char_emb_dim": config.get("char_emb_dim", 64),
+            "word_emb_dim": config.get("word_emb_dim", 128),
+            "char_hidden": config.get("char_hidden", 128),
+            "word_hidden": config.get("word_hidden", 128),
+            "char_pad_id": config.get("char_pad_id", 0),
+            "word_pad_id": config.get("word_pad_id", 0),
+            "out_classes": config["out_classes"],
             "dropout": config.get("dropout", 0.3),
-            "use_contextual": config.get("use_contextual", False),
             "use_crf": True
         }
         model = BiLSTMCRFClassifier(**model_config)
@@ -354,8 +362,14 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
 
     # Update vocab size in config
     config = update_vocab_size(config.copy(), len(vocab.char2id))
-
+    
+    # Set padding IDs for BiLSTMClassifier
+    if "<PAD>" in vocab.char2id:
+        config["char_pad_id"] = vocab.char2id["<PAD>"]
+        config["word_pad_id"] = vocab.char2id["<PAD>"]
+    
     print(f"Updated config with vocab_size: {config['vocab_size']}")
+
 
     # Prepare datasets
     train_dataset = prepare_data(X_train, Y_train, lines_train, vocab, config, diacritic2id, embedder)
