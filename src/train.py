@@ -135,6 +135,7 @@ from src.config import (
 )
 from src.preprocessing.pad_sequences import pad_sequences
 from src.features.contextual_embeddings import ContextualEmbedder
+from src.features.ngram_features import NgramExtractor
 
 # Import models
 from src.models.bilstm_crf import BiLSTMCRF
@@ -167,7 +168,7 @@ def load_data(train_path, val_path, max_samples=None):
     return X_train, Y_train, lines_train, X_val, Y_val, lines_val
 
 
-def prepare_data(X, Y, lines, vocab, config, diacritic2id, embedder=None):
+def prepare_data(X, Y, lines, vocab, config, diacritic2id, embedder=None, ngram_extractor=None):
     """Prepare data for training"""
     if config.get("use_contextual", False):
         # Use custom dataset that computes embeddings on-the-fly
@@ -185,8 +186,16 @@ def prepare_data(X, Y, lines, vocab, config, diacritic2id, embedder=None):
 
         Y_padded, _ = pad_sequences(Y_encoded, pad_value=0)  # Use 0 for padding (valid tag index)
 
-        # Create dataset
-        dataset = TensorDataset(X_padded, Y_padded, mask)
+        # Extract n-gram features if needed
+        if ngram_extractor is not None:
+            # Extract and encode n-grams for each sequence
+            ngram_encoded = [ngram_extractor.encode(seq) for seq in X]
+            ngram_padded, _ = pad_sequences(ngram_encoded, pad_value=0)  # Pad with 0
+            # Create dataset with n-grams
+            dataset = TensorDataset(X_padded, ngram_padded, Y_padded, mask)
+        else:
+            # Create dataset without n-grams
+            dataset = TensorDataset(X_padded, Y_padded, mask)
 
     return dataset
 
@@ -287,7 +296,8 @@ def evaluate_model(model, dataloader, device, diacritic2id, model_name="bilstm_c
     
     # Check model type
     is_fusion_model = model_name.lower() == "arabert_char_bilstm_crf"
-    is_classifier = model_name.lower() in ["char_bilstm_classifier", "charngram_bilstm_classifier"]
+    is_ngram_classifier = model_name.lower() == "charngram_bilstm_classifier"
+    is_simple_classifier = model_name.lower() == "char_bilstm_classifier"
 
     with torch.no_grad():
         for batch in dataloader:
@@ -300,8 +310,17 @@ def evaluate_model(model, dataloader, device, diacritic2id, model_name="bilstm_c
                 
                 # Forward pass with dual inputs
                 predictions = model(X_batch, char_ids_batch, mask=mask_batch)
-            elif is_classifier:
-                # Classifier models: return (logits, predictions) tuple
+            elif is_ngram_classifier:
+                # N-gram classifier: unpack 4 tensors (char_ids, ngram_ids, labels, mask)
+                char_ids_batch, ngram_ids_batch, y_batch, mask_batch = batch
+                char_ids_batch = char_ids_batch.to(device)
+                ngram_ids_batch = ngram_ids_batch.to(device)
+                mask_batch = mask_batch.to(device)
+                
+                # Forward pass returns (logits, predictions)
+                _, predictions = model(char_ids_batch, ngram_ids_batch, mask=mask_batch)
+            elif is_simple_classifier:
+                # Simple classifier: unpack 3 tensors (char_ids, labels, mask)
                 X_batch, y_batch, mask_batch = batch
                 X_batch = X_batch.to(device)
                 mask_batch = mask_batch.to(device)
@@ -428,9 +447,22 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
 
     print(f"Updated config with vocab_size: {config['vocab_size']}")
 
+    # Build n-gram vocabulary if needed
+    ngram_extractor = None
+    if model_name.lower() == "charngram_bilstm_classifier":
+        print("\nBuilding n-gram vocabulary...")
+        ngram_extractor = NgramExtractor(n=2)  # Use bigrams
+        ngram_extractor.build_vocab(X_train)
+        print(f"✓ N-gram vocabulary size: {len(ngram_extractor.ngram2id)}")
+        
+        # Update config with n-gram vocab size
+        from src.config import update_ngram_vocab_size
+        config = update_ngram_vocab_size(config, len(ngram_extractor.ngram2id))
+        print(f"Updated config with ngram_vocab_size: {config['ngram_vocab_size']}")
+
     # Prepare datasets
-    train_dataset = prepare_data(X_train, Y_train, lines_train, vocab, config, diacritic2id, embedder)
-    val_dataset = prepare_data(X_val, Y_val, lines_val, vocab, config, diacritic2id, embedder)
+    train_dataset = prepare_data(X_train, Y_train, lines_train, vocab, config, diacritic2id, embedder, ngram_extractor)
+    val_dataset = prepare_data(X_val, Y_val, lines_val, vocab, config, diacritic2id, embedder, ngram_extractor)
 
     # Create dataloaders
     # Note: batch_size should be reasonable when using contextual embeddings
@@ -479,7 +511,8 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
     
     # Check model type for appropriate handling
     is_fusion_model = model_name.lower() == "arabert_char_bilstm_crf"
-    is_classifier = model_name.lower() in ["char_bilstm_classifier", "charngram_bilstm_classifier"]
+    is_ngram_classifier = model_name.lower() == "charngram_bilstm_classifier"
+    is_simple_classifier = model_name.lower() == "char_bilstm_classifier"
 
     for epoch in range(config["num_epochs"]):
         # Training
@@ -501,8 +534,20 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
 
                 # Forward pass with dual inputs
                 loss = model(X_batch, char_ids_batch, tags=y_batch, mask=mask_batch)
-            elif is_classifier:
-                # Classifier models: return (logits, loss) tuple
+            elif is_ngram_classifier:
+                # N-gram classifier: unpack 4 tensors (char_ids, ngram_ids, labels, mask)
+                char_ids_batch, ngram_ids_batch, y_batch, mask_batch = batch
+                char_ids_batch = char_ids_batch.to(device)
+                ngram_ids_batch = ngram_ids_batch.to(device)
+                y_batch = y_batch.to(device)
+                mask_batch = mask_batch.to(device)
+
+                optimizer.zero_grad()
+
+                # Forward pass with char and ngram inputs
+                _, loss = model(char_ids_batch, ngram_ids_batch, tags=y_batch, mask=mask_batch)
+            elif is_simple_classifier:
+                # Simple classifier: unpack 3 tensors (char_ids, labels, mask)
                 X_batch, y_batch, mask_batch = batch
                 X_batch = X_batch.to(device)
                 y_batch = y_batch.to(device)
