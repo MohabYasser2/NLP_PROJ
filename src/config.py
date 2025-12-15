@@ -94,6 +94,51 @@ BILSTM_CRF_CONFIG = {
 }
 
 # ======================================================
+# AraBERT-BiLSTM-CRF Model Configuration
+# ======================================================
+
+ARABERT_BILSTM_CRF_CONFIG = {
+    "vocab_size": None,  # Will be set dynamically based on data
+    "tagset_size": NUM_DIACRITIC_CLASSES,
+    "embedding_dim": 768,  # AraBERT hidden size
+    "hidden_dim": 256,  # BiLSTM hidden dimension
+    "num_layers": 1,
+    "dropout": 0.3,
+    "learning_rate": 0.001,
+    "weight_decay": 1e-5,
+    "num_epochs": 50,
+    "patience": 7,
+    "gradient_clip": 5.0,
+    "use_crf": True,
+    "use_contextual": True,
+    "freeze_arabert": True  # Freeze AraBERT weights
+}
+
+# ======================================================
+# Hierarchical BiLSTM Model Configuration
+# ======================================================
+
+HIERARCHICAL_BILSTM_CONFIG = {
+    "char_vocab_size": None,  # Will be set dynamically
+    "word_vocab_size": None,  # Will be set dynamically
+    "char_embedding_dim": 128,
+    "word_embedding_dim": 256,
+    "char_hidden_dim": 256,
+    "word_hidden_dim": 256,
+    "char_num_layers": 2,
+    "word_num_layers": 2,
+    "classifier_hidden_dim": 512,
+    "num_classes": NUM_DIACRITIC_CLASSES,
+    "max_seq_length": 256,  # Maximum sequence length for batching
+    "dropout": 0.3,
+    "learning_rate": 0.001,
+    "weight_decay": 1e-5,
+    "num_epochs": 50,
+    "patience": 5,
+    "gradient_clip": 5.0
+}
+
+# ======================================================
 # CONFIGURATION NOTES FOR HIGH ACCURACY
 # ======================================================
 # 
@@ -173,13 +218,17 @@ def get_model_config(model_name: str):
         "rnn": RNN_CONFIG,
         "lstm": LSTM_CONFIG,
         "crf": CRF_CONFIG,
-        "bilstm_crf": BILSTM_CRF_CONFIG
+        "bilstm_crf": BILSTM_CRF_CONFIG,
+        "hierarchical_bilstm": HIERARCHICAL_BILSTM_CONFIG,
+        "arabert_bilstm_crf": ARABERT_BILSTM_CRF_CONFIG
     }
     return configs.get(model_name.lower())
 
 def update_vocab_size(config: dict, vocab_size: int):
     """Update vocab_size in model config"""
     config["vocab_size"] = vocab_size
+    config["char_vocab_size"] = vocab_size  # For hierarchical model
+    config["word_vocab_size"] = vocab_size  # Simplified
     return config
 
 def get_feature_model_config(model_name: str):

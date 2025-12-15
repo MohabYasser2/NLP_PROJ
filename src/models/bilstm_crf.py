@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from TorchCRF import CRF
+from TorchCRF import CRF # type: ignore
 
 class BiLSTMCRF(nn.Module):
     def __init__(

@@ -114,6 +114,8 @@ from src.features.contextual_embeddings import ContextualEmbedder
 
 # Import models
 from src.models.bilstm_crf import BiLSTMCRF
+from src.models.hierarchical_bilstm import HierarchicalBiLSTM
+from src.models.arabert_bilstm_crf import AraBERTBiLSTMCRF
 # TODO: Import other models when implemented
 # from src.models.rnn import RNNModel
 # from src.models.lstm import LSTMModel
@@ -175,6 +177,24 @@ def get_model(model_name, config):
             "use_contextual": config.get("use_contextual", False)
         }
         model = BiLSTMCRF(**model_config)
+    elif model_name.lower() == "hierarchical_bilstm":
+        # For hierarchical model, we need char and word vocab sizes
+        model_config = config.copy()
+        model_config["char_vocab_size"] = config["char_vocab_size"]
+        model_config["word_vocab_size"] = config["word_vocab_size"]
+        model = HierarchicalBiLSTM(model_config)
+    elif model_name.lower() == "arabert_bilstm_crf":
+        # AraBERT model
+        model_config = {
+            "vocab_size": config["vocab_size"],
+            "tagset_size": config["tagset_size"],
+            "embedding_dim": config["embedding_dim"],
+            "hidden_dim": config["hidden_dim"],
+            "num_layers": config["num_layers"],
+            "dropout": config["dropout"],
+            "freeze_arabert": config.get("freeze_arabert", True)
+        }
+        model = AraBERTBiLSTMCRF(**model_config)
     else:
         raise ValueError(f"Model {model_name} not implemented yet")
 
@@ -210,23 +230,42 @@ def evaluate_model(model, dataloader, device, diacritic2id):
 
             predictions = model(X_batch, mask=mask_batch)
 
-            # predictions is a list of lists (one per sequence in batch)
-            # y_batch is tensor, mask_batch is tensor
-            for pred_seq, target_seq, mask_seq in zip(predictions, y_batch, mask_batch):
-                pred_flat = []
-                target_flat = []
-                mask_flat = []
+            # Handle different prediction formats
+            if isinstance(predictions, list):
+                # CRF models: predictions is a list of lists (one per sequence in batch)
+                for pred_seq, target_seq, mask_seq in zip(predictions, y_batch, mask_batch):
+                    pred_flat = []
+                    target_flat = []
+                    mask_flat = []
 
-                for p, t, m in zip(pred_seq, target_seq, mask_seq):
-                    if m:
-                        pred_flat.append(p)
-                        target_flat.append(t.item())
-                        mask_flat.append(True)
+                    for p, t, m in zip(pred_seq, target_seq, mask_seq):
+                        if m:
+                            pred_flat.append(p)
+                            target_flat.append(t.item())
+                            mask_flat.append(True)
 
-                if pred_flat:
-                    all_predictions.append(pred_flat)
-                    all_targets.append(target_flat)
-                    all_masks.append(mask_flat)
+                    if pred_flat:
+                        all_predictions.append(pred_flat)
+                        all_targets.append(target_flat)
+                        all_masks.append(mask_flat)
+            else:
+                # Non-CRF models: predictions is tensor (batch, seq_len)
+                predictions = predictions.cpu()
+                for pred_seq, target_seq, mask_seq in zip(predictions, y_batch, mask_batch):
+                    pred_flat = []
+                    target_flat = []
+                    mask_flat = []
+
+                    for p, t, m in zip(pred_seq, target_seq, mask_seq):
+                        if m:
+                            pred_flat.append(p.item())
+                            target_flat.append(t.item())
+                            mask_flat.append(True)
+
+                    if pred_flat:
+                        all_predictions.append(pred_flat)
+                        all_targets.append(target_flat)
+                        all_masks.append(mask_flat)
 
     # Calculate metrics (exclude spaces from accuracy like DER does)
     flat_predictions = []
@@ -423,7 +462,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Arabic Diacritization Models")
     parser.add_argument(
         "--model",
-        choices=["rnn", "lstm", "crf", "bilstm_crf"],
+        choices=["rnn", "lstm", "crf", "bilstm_crf", "hierarchical_bilstm", "arabert_bilstm_crf"],
         default="bilstm_crf",
         help="Model to train"
     )

@@ -162,7 +162,7 @@ def evaluate_model(model, dataloader, device, diacritic2id):
                     flat_predictions.append(p)
                     flat_targets.append(t)
 
-    accuracy = accuracy_score(flat_targets, flat_predictions) if flat_targets else 0
+    accuracy = accuracy_score(flat_targets, [p.cpu().item() if isinstance(p, torch.Tensor) else p for p in flat_predictions]) if flat_targets else 0
     der = calculate_der(all_predictions, all_targets, all_masks)
 
     return accuracy, der
@@ -179,6 +179,24 @@ def get_model(model_name, config):
             "use_contextual": config.get("use_contextual", False)
         }
         model = BiLSTMCRF(**model_config)
+    elif model_name.lower() == "hierarchical_bilstm":
+        # For hierarchical model, we need char and word vocab sizes
+        model_config = config.copy()
+        model_config["char_vocab_size"] = config["char_vocab_size"]
+        model_config["word_vocab_size"] = config["word_vocab_size"]
+        model = HierarchicalBiLSTM(model_config)
+    elif model_name.lower() == "arabert_bilstm_crf":
+        # AraBERT model
+        model_config = {
+            "vocab_size": config["vocab_size"],
+            "tagset_size": config["tagset_size"],
+            "embedding_dim": config["embedding_dim"],
+            "hidden_dim": config["hidden_dim"],
+            "num_layers": config["num_layers"],
+            "dropout": config["dropout"],
+            "freeze_arabert": config.get("freeze_arabert", True)
+        }
+        model = AraBERTBiLSTMCRF(**model_config)
     else:
         raise ValueError(f"Model {model_name} not implemented yet")
 
@@ -207,14 +225,13 @@ def prepare_test_data(X, Y, lines, vocab, config, diacritic2id, embedder=None):
         Y_encoded = encode_corpus(Y, diacritic2id)
 
         # Pad sequences
-        X_padded = pad_sequences(X_encoded, config["max_seq_length"])
-        Y_padded = pad_sequences(Y_encoded, config["max_seq_length"])
-        masks = [[True] * len(seq) + [False] * (config["max_seq_length"] - len(seq)) for seq in X_encoded]
+        X_padded, mask = pad_sequences(X_encoded, pad_value=vocab.char2id["<PAD>"])
+        Y_padded, _ = pad_sequences(Y_encoded, pad_value=0)  # Use 0 for padding (valid tag index)
 
         dataset = TensorDataset(
-            torch.tensor(X_padded, dtype=torch.long),
-            torch.tensor(Y_padded, dtype=torch.long),
-            torch.tensor(masks, dtype=torch.bool)
+            X_padded,
+            Y_padded,
+            mask
         )
 
     return dataset
@@ -239,9 +256,9 @@ def predict_diacritics(model, lines, vocab, config, diacritic2id, embedder, devi
         else:
             # Encode characters
             X_encoded = vocab.encode(base_chars)
-            X_padded = pad_sequences([X_encoded], config["max_seq_length"])
-            X_tensor = torch.tensor(X_padded, dtype=torch.long).to(device)
-            mask = torch.tensor([[True] * len(X_encoded) + [False] * (config["max_seq_length"] - len(X_encoded))], dtype=torch.bool).to(device)
+            X_padded, mask_tensor = pad_sequences([X_encoded], pad_value=vocab.char2id["<PAD>"])
+            X_tensor = X_padded.to(device)
+            mask = mask_tensor.to(device)
 
         with torch.no_grad():
             pred = model(X_tensor, mask=mask)
@@ -283,12 +300,14 @@ from src.features.contextual_embeddings import ContextualEmbedder
 
 # Import models
 from src.models.bilstm_crf import BiLSTMCRF
+from src.models.hierarchical_bilstm import HierarchicalBiLSTM
+from src.models.arabert_bilstm_crf import AraBERTBiLSTMCRF
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test Arabic Diacritization Models")
     parser.add_argument(
         "--model",
-        choices=["bilstm_crf"],  # Add more as implemented
+        choices=["bilstm_crf", "hierarchical_bilstm", "arabert_bilstm_crf"],  # Add more as implemented
         required=True,
         help="Model name"
     )
@@ -367,6 +386,10 @@ if __name__ == "__main__":
 
     # Update vocab size in config
     config = update_vocab_size(config.copy(), len(vocab.char2id))
+    
+    # Add max_seq_length if not present (for hierarchical model)
+    if "max_seq_length" not in config:
+        config["max_seq_length"] = 256
 
     # Initialize model
     model = get_model(args.model, config)
