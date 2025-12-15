@@ -135,12 +135,16 @@ def tokenize_file(input_path: str) -> Tuple[List[List[str]], List[List[str]], Li
             if not line:
                 continue
 
-            all_lines.append(line)
             base_chars, labels = tokenize_line(line)
+
+            # Skip lines with no Arabic characters
+            if not base_chars:
+                continue
 
             # Safety check: alignment
             assert len(base_chars) == len(labels), "Token-label length mismatch"
 
+            all_lines.append(line)
             all_base_chars.append(base_chars)
             all_labels.append(labels)
 

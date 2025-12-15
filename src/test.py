@@ -155,7 +155,7 @@ def evaluate_model(model, dataloader, device, diacritic2id, model_name="bilstm_c
     is_simple_classifier = model_name.lower() == "char_bilstm_classifier"
 
     with torch.no_grad():
-        for batch in dataloader:
+        for batch in tqdm(dataloader, desc="Evaluating", unit="batch"):
             if is_fusion_model:
                 # Fusion model: unpack 4 tensors (embedding, char_ids, labels, mask)
                 X_batch, char_ids_batch, y_batch, mask_batch = batch
@@ -320,10 +320,12 @@ def load_test_data(test_path, max_samples=None):
     """Load test data"""
     print("Loading test data...")
     X_test, Y_test, lines_test = tokenize_file(test_path)
+    total_loaded = len(X_test)
     if max_samples:
         X_test = X_test[:max_samples]
         Y_test = Y_test[:max_samples]
         lines_test = lines_test[:max_samples]
+        print(f"  (Limited from {total_loaded} to {len(X_test)} samples)")
 
     return X_test, Y_test, lines_test
 
@@ -486,6 +488,21 @@ if __name__ == "__main__":
         default=None,
         help="Maximum number of test samples"
     )
+    parser.add_argument(
+        "--competition",
+        action="store_true",
+        help="Competition mode: generate CSV with character IDs and diacritic labels"
+    )
+    parser.add_argument(
+        "--competition_input",
+        default=None,
+        help="Path to undiacritized text file for competition (one line per sample)"
+    )
+    parser.add_argument(
+        "--competition_output",
+        default="competition_submission.csv",
+        help="Path to save competition CSV output"
+    )
 
     args = parser.parse_args()
 
@@ -545,6 +562,132 @@ if __name__ == "__main__":
     model.load_state_dict(checkpoint['model_state_dict'])
     model.to(device)
     print("✓ Model loaded successfully")
+
+    # Competition mode: Generate CSV with character IDs and diacritic labels
+    if args.competition:
+        if not args.competition_input:
+            raise ValueError("--competition_input is required in competition mode")
+        
+        print("\n" + "="*70)
+        print("COMPETITION MODE")
+        print("="*70)
+        
+        # Load undiacritized text
+        print(f"\nLoading undiacritized text from {args.competition_input}...")
+        with open(args.competition_input, "r", encoding="utf-8") as f:
+            lines = [line.strip() for line in f if line.strip()]
+        
+        print(f"✓ Loaded {len(lines)} lines")
+        
+        # Predict diacritics for all lines
+        print("\nGenerating diacritic predictions...")
+        model.eval()
+        
+        # Detect model type
+        is_fusion_model = hasattr(model, 'char_embedding') and hasattr(model, 'arabert_projection')
+        is_ngram_classifier = hasattr(model, 'ngram_embedding') and hasattr(model, 'char_embedding')
+        is_simple_classifier = hasattr(model, 'char_embedding') and not hasattr(model, 'arabert_projection') and not hasattr(model, 'ngram_embedding')
+        
+        all_predictions = []
+        char_id = 0
+        
+        for line_idx, line in enumerate(tqdm(lines, desc="Processing lines")):
+            # Remove diacritics from line (if any)
+            undiacritized = remove_diacritics(line)
+            
+            # Get base characters using tokenize_line (consistent with training)
+            base_chars, _ = tokenize_line(undiacritized)
+            
+            if not base_chars:
+                continue
+            
+            # Prepare input based on model type
+            if config.get("use_contextual", False):
+                # Use embedder on undiacritized line
+                emb = embedder.embed_line_chars(undiacritized)
+                
+                # For fusion models, we need matching char_ids
+                if is_fusion_model:
+                    # Get char_ids that match the embedding length
+                    # embed_line_chars returns embeddings for all characters in the processed line
+                    # We need to ensure base_chars matches this
+                    char_ids = vocab.encode(base_chars)
+                    
+                    # Align lengths: emb should match char_ids length
+                    min_len = min(len(emb), len(char_ids))
+                    emb = emb[:min_len]
+                    char_ids = char_ids[:min_len]
+                    
+                    X_tensor = torch.tensor(emb, dtype=torch.float32).unsqueeze(0).to(device)
+                    char_ids_tensor = torch.tensor(char_ids, dtype=torch.long).unsqueeze(0).to(device)
+                    mask = torch.tensor([True] * min_len, dtype=torch.bool).unsqueeze(0).to(device)
+                else:
+                    X_tensor = torch.tensor(emb, dtype=torch.float32).unsqueeze(0).to(device)
+                    mask = torch.tensor([True] * len(emb), dtype=torch.bool).unsqueeze(0).to(device)
+            else:
+                # Encode characters
+                X_encoded = vocab.encode(base_chars)
+                X_padded, mask_tensor = pad_sequences([X_encoded], pad_value=vocab.char2id["<PAD>"])
+                X_tensor = X_padded.to(device)
+                mask = mask_tensor.to(device)
+            
+            # Predict
+            with torch.no_grad():
+                if config.get("use_contextual", False) and is_fusion_model:
+                    pred = model(X_tensor, char_ids_tensor, mask=mask)
+                elif is_ngram_classifier:
+                    char_ids = vocab.encode(base_chars)
+                    char_ids_tensor = torch.tensor(char_ids, dtype=torch.long).unsqueeze(0).to(device)
+                    ngram_ids_tensor = char_ids_tensor.clone()
+                    _, pred = model(char_ids_tensor, ngram_ids_tensor, mask=mask)
+                elif is_simple_classifier:
+                    _, pred = model(X_tensor, mask=mask)
+                else:
+                    pred = model(X_tensor, mask=mask)
+            
+            # Extract predictions
+            if isinstance(pred, list):
+                # Handle different CRF return formats
+                if len(pred) > 0 and isinstance(pred[0], list):
+                    # Check if it's the expected format [[label1, label2, ...]] or wrong format [[label1], [label2], ...]
+                    if len(pred) == 1:
+                        # Correct format: one sequence in batch
+                        pred_labels = pred[0][:len(base_chars)]
+                    else:
+                        # Wrong format from CRF: flatten the nested lists
+                        pred_labels = [item[0] if isinstance(item, list) and len(item) > 0 else item for item in pred]
+                        pred_labels = pred_labels[:len(base_chars)]
+                else:
+                    # pred is already a flat list
+                    pred_labels = pred[:len(base_chars)]
+            else:
+                pred_labels = pred[0][:len(base_chars)].cpu().tolist()
+            
+            # Store predictions with IDs
+            for label in pred_labels:
+                if isinstance(label, torch.Tensor):
+                    label = label.item()
+                all_predictions.append((char_id, int(label)))
+                char_id += 1
+        
+        # Write to CSV
+        print(f"\nSaving competition output to {args.competition_output}...")
+        with open(args.competition_output, "w", encoding="utf-8") as f:
+            f.write("ID,label\n")
+            for char_id, label in all_predictions:
+                f.write(f"{char_id},{label}\n")
+        
+        print("✓ Competition CSV saved!")
+        print(f"  Total characters: {len(all_predictions)}")
+        print("\n" + "="*70)
+        print("COMPETITION MODE COMPLETED!")
+        print("="*70)
+        print(f"Output file: {args.competition_output}")
+        print("="*70)
+        
+        # Exit after competition mode
+        import sys
+        sys.exit(0)
 
     # Load test data for evaluation
     X_test, Y_test, lines_test = load_test_data(args.test_data, args.max_samples)
