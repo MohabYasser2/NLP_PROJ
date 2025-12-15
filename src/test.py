@@ -224,7 +224,7 @@ def get_model(model_name, config):
         model_config = config.copy()
         model_config["char_vocab_size"] = config["char_vocab_size"]
         model_config["word_vocab_size"] = config["word_vocab_size"]
-        model = HierarchicalBiLSTM(model_config)
+        # model = HierarchicalBiLSTM(model_config)
     elif model_name.lower() == "arabert_bilstm_crf":
         # AraBERT model
         model_config = {
@@ -352,7 +352,7 @@ from src.features.contextual_embeddings import ContextualEmbedder
 
 # Import models
 from src.models.bilstm_crf import BiLSTMCRF
-from src.models.hierarchical_bilstm import HierarchicalBiLSTM
+
 from src.models.arabert_bilstm_crf import AraBERTBiLSTMCRF
 from src.models.arabert_char_bilstm_crf import AraBERTCharBiLSTMCRF
 

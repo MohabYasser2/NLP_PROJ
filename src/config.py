@@ -137,6 +137,49 @@ ARABERT_CHAR_BILSTM_CRF_CONFIG = {
 }
 
 # ======================================================
+# Character BiLSTM Classifier Configuration (Simple Baseline)
+# ======================================================
+
+CHAR_BILSTM_CLASSIFIER_CONFIG = {
+    "vocab_size": None,  # Will be set dynamically
+    "tagset_size": NUM_DIACRITIC_CLASSES,
+    "embedding_dim": 128,  # Character embedding dimension
+    "hidden_dim": 256,  # BiLSTM hidden dimension
+    "num_layers": 2,  # Number of BiLSTM layers
+    "dropout": 0.5,  # Dropout rate
+    "learning_rate": 0.001,
+    "weight_decay": 1e-5,
+    "num_epochs": 50,
+    "patience": 7,
+    "gradient_clip": 5.0,
+    "batch_size": 32,
+    "use_contextual": False
+}
+
+# ======================================================
+# Character + N-gram BiLSTM Classifier Configuration (Improved)
+# ======================================================
+
+CHARNGRAM_BILSTM_CLASSIFIER_CONFIG = {
+    "char_vocab_size": None,  # Will be set dynamically
+    "ngram_vocab_size": None,  # Will be set dynamically
+    "tagset_size": NUM_DIACRITIC_CLASSES,
+    "char_embedding_dim": 128,  # Character embedding dimension
+    "ngram_embedding_dim": 64,  # N-gram embedding dimension
+    "hidden_dim": 256,  # BiLSTM hidden dimension
+    "num_layers": 2,  # Number of BiLSTM layers
+    "dropout": 0.5,  # Dropout rate
+    "learning_rate": 0.001,
+    "weight_decay": 1e-5,
+    "num_epochs": 50,
+    "patience": 7,
+    "gradient_clip": 5.0,
+    "batch_size": 32,
+    "use_contextual": False,
+    "ngram_n": 2  # Bigram features
+}
+
+# ======================================================
 # Hierarchical BiLSTM Model Configuration
 # ======================================================
 
@@ -243,7 +286,9 @@ def get_model_config(model_name: str):
         "bilstm_crf": BILSTM_CRF_CONFIG,
         "hierarchical_bilstm": HIERARCHICAL_BILSTM_CONFIG,
         "arabert_bilstm_crf": ARABERT_BILSTM_CRF_CONFIG,
-        "arabert_char_bilstm_crf": ARABERT_CHAR_BILSTM_CRF_CONFIG
+        "arabert_char_bilstm_crf": ARABERT_CHAR_BILSTM_CRF_CONFIG,
+        "char_bilstm_classifier": CHAR_BILSTM_CLASSIFIER_CONFIG,
+        "charngram_bilstm_classifier": CHARNGRAM_BILSTM_CLASSIFIER_CONFIG
     }
     return configs.get(model_name.lower())
 
@@ -252,6 +297,11 @@ def update_vocab_size(config: dict, vocab_size: int):
     config["vocab_size"] = vocab_size
     config["char_vocab_size"] = vocab_size  # For hierarchical model
     config["word_vocab_size"] = vocab_size  # Simplified
+    return config
+
+def update_ngram_vocab_size(config: dict, ngram_vocab_size: int):
+    """Update ngram_vocab_size in model config"""
+    config["ngram_vocab_size"] = ngram_vocab_size
     return config
 
 def get_feature_model_config(model_name: str):

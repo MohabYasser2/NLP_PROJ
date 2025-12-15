@@ -138,9 +138,10 @@ from src.features.contextual_embeddings import ContextualEmbedder
 
 # Import models
 from src.models.bilstm_crf import BiLSTMCRF
-from src.models.hierarchical_bilstm import HierarchicalBiLSTM
 from src.models.arabert_bilstm_crf import AraBERTBiLSTMCRF
 from src.models.arabert_char_bilstm_crf import AraBERTCharBiLSTMCRF
+from src.models.char_bilstm_classifier import CharBiLSTMClassifier
+from src.models.charngram_bilstm_classifier import CharNgramBiLSTMClassifier
 # TODO: Import other models when implemented
 # from src.models.rnn import RNNModel
 # from src.models.lstm import LSTMModel
@@ -207,7 +208,7 @@ def get_model(model_name, config):
         model_config = config.copy()
         model_config["char_vocab_size"] = config["char_vocab_size"]
         model_config["word_vocab_size"] = config["word_vocab_size"]
-        model = HierarchicalBiLSTM(model_config)
+        # model = HierarchicalBiLSTM(model_config)
     elif model_name.lower() == "arabert_bilstm_crf":
         # AraBERT model
         model_config = {
@@ -232,6 +233,30 @@ def get_model(model_name, config):
             "dropout": config["dropout"]
         }
         model = AraBERTCharBiLSTMCRF(**model_config)
+    elif model_name.lower() == "char_bilstm_classifier":
+        # Character-only BiLSTM Classifier (Simple)
+        model_config = {
+            "vocab_size": config["vocab_size"],
+            "tagset_size": config["tagset_size"],
+            "embedding_dim": config["embedding_dim"],
+            "hidden_dim": config["hidden_dim"],
+            "num_layers": config["num_layers"],
+            "dropout": config["dropout"]
+        }
+        model = CharBiLSTMClassifier(**model_config)
+    elif model_name.lower() == "charngram_bilstm_classifier":
+        # Character + N-gram BiLSTM Classifier (Improved)
+        model_config = {
+            "char_vocab_size": config["char_vocab_size"],
+            "ngram_vocab_size": config["ngram_vocab_size"],
+            "tagset_size": config["tagset_size"],
+            "char_embedding_dim": config["char_embedding_dim"],
+            "ngram_embedding_dim": config["ngram_embedding_dim"],
+            "hidden_dim": config["hidden_dim"],
+            "num_layers": config["num_layers"],
+            "dropout": config["dropout"]
+        }
+        model = CharNgramBiLSTMClassifier(**model_config)
     else:
         raise ValueError(f"Model {model_name} not implemented yet")
 
@@ -260,8 +285,9 @@ def evaluate_model(model, dataloader, device, diacritic2id, model_name="bilstm_c
     all_targets = []
     all_masks = []
     
-    # Check if this is a fusion model that needs dual inputs
+    # Check model type
     is_fusion_model = model_name.lower() == "arabert_char_bilstm_crf"
+    is_classifier = model_name.lower() in ["char_bilstm_classifier", "charngram_bilstm_classifier"]
 
     with torch.no_grad():
         for batch in dataloader:
@@ -274,8 +300,16 @@ def evaluate_model(model, dataloader, device, diacritic2id, model_name="bilstm_c
                 
                 # Forward pass with dual inputs
                 predictions = model(X_batch, char_ids_batch, mask=mask_batch)
+            elif is_classifier:
+                # Classifier models: return (logits, predictions) tuple
+                X_batch, y_batch, mask_batch = batch
+                X_batch = X_batch.to(device)
+                mask_batch = mask_batch.to(device)
+                
+                # Forward pass returns (logits, predictions)
+                _, predictions = model(X_batch, mask=mask_batch)
             else:
-                # Standard model: unpack 3 tensors (X, y, mask)
+                # Standard CRF model: unpack 3 tensors (X, y, mask)
                 X_batch, y_batch, mask_batch = batch
                 X_batch = X_batch.to(device)
                 mask_batch = mask_batch.to(device)
@@ -443,8 +477,9 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
     patience = config["patience"]
     patience_counter = 0
     
-    # Check if this is a fusion model that needs dual inputs
+    # Check model type for appropriate handling
     is_fusion_model = model_name.lower() == "arabert_char_bilstm_crf"
+    is_classifier = model_name.lower() in ["char_bilstm_classifier", "charngram_bilstm_classifier"]
 
     for epoch in range(config["num_epochs"]):
         # Training
@@ -466,8 +501,19 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
 
                 # Forward pass with dual inputs
                 loss = model(X_batch, char_ids_batch, tags=y_batch, mask=mask_batch)
+            elif is_classifier:
+                # Classifier models: return (logits, loss) tuple
+                X_batch, y_batch, mask_batch = batch
+                X_batch = X_batch.to(device)
+                y_batch = y_batch.to(device)
+                mask_batch = mask_batch.to(device)
+
+                optimizer.zero_grad()
+
+                # Forward pass returns (logits, loss)
+                _, loss = model(X_batch, tags=y_batch, mask=mask_batch)
             else:
-                # Standard model: unpack 3 tensors (X, y, mask)
+                # Standard CRF model: unpack 3 tensors (X, y, mask)
                 X_batch, y_batch, mask_batch = batch
                 X_batch = X_batch.to(device)
                 y_batch = y_batch.to(device)
@@ -535,7 +581,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Arabic Diacritization Models")
     parser.add_argument(
         "--model",
-        choices=["rnn", "lstm", "crf", "bilstm_crf", "hierarchical_bilstm", "arabert_bilstm_crf", "arabert_char_bilstm_crf"],
+        choices=["rnn", "lstm", "crf", "bilstm_crf", "hierarchical_bilstm", "arabert_bilstm_crf", "arabert_char_bilstm_crf", "char_bilstm_classifier", "charngram_bilstm_classifier"],
         default="bilstm_crf",
         help="Model to train"
     )
