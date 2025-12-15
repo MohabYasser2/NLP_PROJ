@@ -115,6 +115,28 @@ ARABERT_BILSTM_CRF_CONFIG = {
 }
 
 # ======================================================
+# AraBERT + Character Fusion BiLSTM-CRF (SOTA Model)
+# ======================================================
+
+ARABERT_CHAR_BILSTM_CRF_CONFIG = {
+    "char_vocab_size": None,  # Will be set dynamically based on data
+    "tagset_size": NUM_DIACRITIC_CLASSES,
+    "arabert_dim": 768,  # AraBERT hidden size
+    "char_embedding_dim": 100,  # Character embedding dimension
+    "hidden_dim": 512,  # BiLSTM hidden dimension (larger for fusion)
+    "num_layers": 2,  # Deeper network for better representation
+    "dropout": 0.3,  # Dropout for regularization
+    "learning_rate": 0.001,
+    "weight_decay": 1e-5,
+    "num_epochs": 50,
+    "patience": 7,
+    "gradient_clip": 5.0,
+    "use_crf": True,
+    "use_contextual": True,  # Uses AraBERT embeddings
+    "batch_size": 1  # Memory constraint with contextual embeddings
+}
+
+# ======================================================
 # Hierarchical BiLSTM Model Configuration
 # ======================================================
 
@@ -220,7 +242,8 @@ def get_model_config(model_name: str):
         "crf": CRF_CONFIG,
         "bilstm_crf": BILSTM_CRF_CONFIG,
         "hierarchical_bilstm": HIERARCHICAL_BILSTM_CONFIG,
-        "arabert_bilstm_crf": ARABERT_BILSTM_CRF_CONFIG
+        "arabert_bilstm_crf": ARABERT_BILSTM_CRF_CONFIG,
+        "arabert_char_bilstm_crf": ARABERT_CHAR_BILSTM_CRF_CONFIG
     }
     return configs.get(model_name.lower())
 

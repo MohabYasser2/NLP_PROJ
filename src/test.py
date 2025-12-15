@@ -37,7 +37,10 @@ def remove_diacritics(text):
     return DIACRITICS.sub('', text)
 
 class ContextualDataset(Dataset):
-    """Custom dataset that computes embeddings on-the-fly to save memory"""
+    """
+    Custom dataset that computes embeddings on-the-fly to save memory.
+    Returns both AraBERT embeddings AND character IDs for fusion models.
+    """
     def __init__(self, X, Y, lines, vocab, config, diacritic2id, embedder):
         self.X = X
         self.Y = Y
@@ -57,21 +60,33 @@ class ContextualDataset(Dataset):
         line = self.lines[idx]
         y_seq = self.Y_encoded[idx]
 
-        # Compute embedding on-the-fly
-        emb = self.embedder.embed_line_chars(line)
-
-        # Pad to max length in batch (handled by collate_fn)
-        y_padded = np.pad(y_seq, (0, max(0, len(emb) - len(y_seq))), mode='constant')
+        # 1) Compute AraBERT embedding on-the-fly (per-character)
+        emb = self.embedder.embed_line_chars(line)  # (T, 768)
+        
+        # 2) Encode character IDs (for morphology fusion)
+        chars = list(line)
+        char_ids = self.vocab.encode(chars)  # (T,)
+        
+        # Align lengths safely
+        T = min(len(emb), len(char_ids), len(y_seq))
+        emb = emb[:T]
+        char_ids = char_ids[:T]
+        y_seq = y_seq[:T]
 
         return {
-            'embedding': torch.tensor(emb, dtype=torch.float32),
-            'label': torch.tensor(y_padded[:len(emb)], dtype=torch.long),
-            'mask': torch.tensor([True] * len(emb), dtype=torch.bool)
+            'embedding': torch.tensor(emb, dtype=torch.float32),      # (T, 768)
+            'char_ids': torch.tensor(char_ids, dtype=torch.long),     # (T,)
+            'label': torch.tensor(y_seq, dtype=torch.long),           # (T,)
+            'mask': torch.tensor([True] * T, dtype=torch.bool)        # (T,)
         }
 
 def collate_contextual_batch(batch):
-    """Collate function to pad embeddings in a batch"""
+    """
+    Collate function to pad embeddings, char_ids, labels, and masks in a batch.
+    Supports dual-input models (AraBERT + char morphology).
+    """
     embeddings = [item['embedding'] for item in batch]
+    char_ids = [item['char_ids'] for item in batch]
     labels = [item['label'] for item in batch]
     masks = [item['mask'] for item in batch]
 
@@ -80,28 +95,37 @@ def collate_contextual_batch(batch):
 
     # Pad all to max_len
     padded_embeddings = []
+    padded_char_ids = []
     padded_labels = []
     padded_masks = []
 
-    for emb, label, mask in zip(embeddings, labels, masks):
+    for emb, ch_id, label, mask in zip(embeddings, char_ids, labels, masks):
         pad_len = max_len - len(emb)
         if pad_len > 0:
+            # Pad embeddings (T, 768) -> (max_len, 768)
             padded_emb = torch.nn.functional.pad(emb, (0, 0, 0, pad_len), value=0.0)
-            padded_label = torch.nn.functional.pad(label.unsqueeze(0), (0, pad_len), value=0).squeeze(0)
+            # Pad char_ids (T,) -> (max_len,)
+            padded_ch = torch.nn.functional.pad(ch_id, (0, pad_len), value=0)
+            # Pad labels (T,) -> (max_len,)
+            padded_label = torch.nn.functional.pad(label, (0, pad_len), value=0)
+            # Pad masks (T,) -> (max_len,)
             padded_mask = torch.cat([mask, torch.zeros(pad_len, dtype=torch.bool)])
         else:
             padded_emb = emb
+            padded_ch = ch_id
             padded_label = label
             padded_mask = mask
 
         padded_embeddings.append(padded_emb)
+        padded_char_ids.append(padded_ch)
         padded_labels.append(padded_label)
         padded_masks.append(padded_mask)
 
     return (
-        torch.stack(padded_embeddings),
-        torch.stack(padded_labels),
-        torch.stack(padded_masks)
+        torch.stack(padded_embeddings),  # (batch, max_len, 768)
+        torch.stack(padded_char_ids),    # (batch, max_len)
+        torch.stack(padded_labels),      # (batch, max_len)
+        torch.stack(padded_masks)        # (batch, max_len)
     )
 
 def calculate_der(predictions, targets, mask):
@@ -118,19 +142,35 @@ def calculate_der(predictions, targets, mask):
 
     return errors / total_chars if total_chars > 0 else 0
 
-def evaluate_model(model, dataloader, device, diacritic2id):
+def evaluate_model(model, dataloader, device, diacritic2id, model_name="bilstm_crf"):
     """Evaluate model on test set"""
     model.eval()
     all_predictions = []
     all_targets = []
     all_masks = []
+    
+    # Check if this is a fusion model that needs dual inputs
+    is_fusion_model = model_name.lower() == "arabert_char_bilstm_crf"
 
     with torch.no_grad():
-        for X_batch, y_batch, mask_batch in dataloader:
-            X_batch = X_batch.to(device)
-            mask_batch = mask_batch.to(device)
-
-            predictions = model(X_batch, mask=mask_batch)
+        for batch in dataloader:
+            if is_fusion_model:
+                # Fusion model: unpack 4 tensors (embedding, char_ids, labels, mask)
+                X_batch, char_ids_batch, y_batch, mask_batch = batch
+                X_batch = X_batch.to(device)
+                char_ids_batch = char_ids_batch.to(device)
+                mask_batch = mask_batch.to(device)
+                
+                # Forward pass with dual inputs
+                predictions = model(X_batch, char_ids_batch, mask=mask_batch)
+            else:
+                # Standard model: unpack 3 tensors (X, y, mask)
+                X_batch, y_batch, mask_batch = batch
+                X_batch = X_batch.to(device)
+                mask_batch = mask_batch.to(device)
+                
+                # Forward pass with single input
+                predictions = model(X_batch, mask=mask_batch)
 
             # predictions is a list of lists (one per sequence in batch)
             # y_batch is tensor, mask_batch is tensor
@@ -197,6 +237,18 @@ def get_model(model_name, config):
             "freeze_arabert": config.get("freeze_arabert", True)
         }
         model = AraBERTBiLSTMCRF(**model_config)
+    elif model_name.lower() == "arabert_char_bilstm_crf":
+        # AraBERT + Character Fusion model (SOTA)
+        model_config = {
+            "char_vocab_size": config["char_vocab_size"],
+            "tagset_size": config["tagset_size"],
+            "arabert_dim": config["arabert_dim"],
+            "char_embedding_dim": config["char_embedding_dim"],
+            "hidden_dim": config["hidden_dim"],
+            "num_layers": config["num_layers"],
+            "dropout": config["dropout"]
+        }
+        model = AraBERTCharBiLSTMCRF(**model_config)
     else:
         raise ValueError(f"Model {model_name} not implemented yet")
 
@@ -302,12 +354,13 @@ from src.features.contextual_embeddings import ContextualEmbedder
 from src.models.bilstm_crf import BiLSTMCRF
 from src.models.hierarchical_bilstm import HierarchicalBiLSTM
 from src.models.arabert_bilstm_crf import AraBERTBiLSTMCRF
+from src.models.arabert_char_bilstm_crf import AraBERTCharBiLSTMCRF
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test Arabic Diacritization Models")
     parser.add_argument(
         "--model",
-        choices=["bilstm_crf", "hierarchical_bilstm", "arabert_bilstm_crf"],  # Add more as implemented
+        choices=["bilstm_crf", "hierarchical_bilstm", "arabert_bilstm_crf", "arabert_char_bilstm_crf"],
         required=True,
         help="Model name"
     )
@@ -417,7 +470,7 @@ if __name__ == "__main__":
 
     # Evaluate model
     print("\nEvaluating model...")
-    test_accuracy, test_der = evaluate_model(model, test_loader, device, diacritic2id)
+    test_accuracy, test_der = evaluate_model(model, test_loader, device, diacritic2id, args.model)
     print(f"Test Accuracy: {test_accuracy:.4f}")
     print(f"Test DER: {test_der:.4f}")
 
