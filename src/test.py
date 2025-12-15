@@ -149,8 +149,10 @@ def evaluate_model(model, dataloader, device, diacritic2id, model_name="bilstm_c
     all_targets = []
     all_masks = []
     
-    # Check if this is a fusion model that needs dual inputs
+    # Check model type
     is_fusion_model = model_name.lower() == "arabert_char_bilstm_crf"
+    is_ngram_classifier = model_name.lower() == "charngram_bilstm_classifier"
+    is_simple_classifier = model_name.lower() == "char_bilstm_classifier"
 
     with torch.no_grad():
         for batch in dataloader:
@@ -163,8 +165,25 @@ def evaluate_model(model, dataloader, device, diacritic2id, model_name="bilstm_c
                 
                 # Forward pass with dual inputs
                 predictions = model(X_batch, char_ids_batch, mask=mask_batch)
+            elif is_ngram_classifier:
+                # N-gram classifier: unpack 4 tensors (char_ids, ngram_ids, labels, mask)
+                char_ids_batch, ngram_ids_batch, y_batch, mask_batch = batch
+                char_ids_batch = char_ids_batch.to(device)
+                ngram_ids_batch = ngram_ids_batch.to(device)
+                mask_batch = mask_batch.to(device)
+                
+                # Forward pass returns (logits, predictions)
+                _, predictions = model(char_ids_batch, ngram_ids_batch, mask=mask_batch)
+            elif is_simple_classifier:
+                # Simple classifier: unpack 3 tensors (char_ids, labels, mask)
+                X_batch, y_batch, mask_batch = batch
+                X_batch = X_batch.to(device)
+                mask_batch = mask_batch.to(device)
+                
+                # Forward pass returns (logits, predictions)
+                _, predictions = model(X_batch, mask=mask_batch)
             else:
-                # Standard model: unpack 3 tensors (X, y, mask)
+                # Standard CRF model: unpack 3 tensors (X, y, mask)
                 X_batch, y_batch, mask_batch = batch
                 X_batch = X_batch.to(device)
                 mask_batch = mask_batch.to(device)
@@ -172,23 +191,42 @@ def evaluate_model(model, dataloader, device, diacritic2id, model_name="bilstm_c
                 # Forward pass with single input
                 predictions = model(X_batch, mask=mask_batch)
 
-            # predictions is a list of lists (one per sequence in batch)
-            # y_batch is tensor, mask_batch is tensor
-            for pred_seq, target_seq, mask_seq in zip(predictions, y_batch, mask_batch):
-                pred_flat = []
-                target_flat = []
-                mask_flat = []
+            # Handle different prediction formats
+            if isinstance(predictions, list):
+                # CRF models: predictions is a list of lists (one per sequence in batch)
+                for pred_seq, target_seq, mask_seq in zip(predictions, y_batch, mask_batch):
+                    pred_flat = []
+                    target_flat = []
+                    mask_flat = []
 
-                for p, t, m in zip(pred_seq, target_seq, mask_seq):
-                    if m:
-                        pred_flat.append(p)
-                        target_flat.append(t.item())
-                        mask_flat.append(True)
+                    for p, t, m in zip(pred_seq, target_seq, mask_seq):
+                        if m:
+                            pred_flat.append(p)
+                            target_flat.append(t.item())
+                            mask_flat.append(True)
 
-                if pred_flat:
-                    all_predictions.append(pred_flat)
-                    all_targets.append(target_flat)
-                    all_masks.append(mask_flat)
+                    if pred_flat:
+                        all_predictions.append(pred_flat)
+                        all_targets.append(target_flat)
+                        all_masks.append(mask_flat)
+            else:
+                # Non-CRF models: predictions is tensor (batch, seq_len)
+                predictions = predictions.cpu()
+                for pred_seq, target_seq, mask_seq in zip(predictions, y_batch, mask_batch):
+                    pred_flat = []
+                    target_flat = []
+                    mask_flat = []
+
+                    for p, t, m in zip(pred_seq, target_seq, mask_seq):
+                        if m:
+                            pred_flat.append(p.item())
+                            target_flat.append(t.item())
+                            mask_flat.append(True)
+
+                    if pred_flat:
+                        all_predictions.append(pred_flat)
+                        all_targets.append(target_flat)
+                        all_masks.append(mask_flat)
 
     # Calculate metrics (exclude spaces from accuracy like DER does)
     flat_predictions = []
@@ -249,6 +287,30 @@ def get_model(model_name, config):
             "dropout": config["dropout"]
         }
         model = AraBERTCharBiLSTMCRF(**model_config)
+    elif model_name.lower() == "char_bilstm_classifier":
+        # Character-only BiLSTM Classifier (Simple)
+        model_config = {
+            "vocab_size": config["vocab_size"],
+            "tagset_size": config["tagset_size"],
+            "embedding_dim": config["embedding_dim"],
+            "hidden_dim": config["hidden_dim"],
+            "num_layers": config["num_layers"],
+            "dropout": config["dropout"]
+        }
+        model = CharBiLSTMClassifier(**model_config)
+    elif model_name.lower() == "charngram_bilstm_classifier":
+        # Character + N-gram BiLSTM Classifier (Improved)
+        model_config = {
+            "char_vocab_size": config["char_vocab_size"],
+            "ngram_vocab_size": config["ngram_vocab_size"],
+            "tagset_size": config["tagset_size"],
+            "char_embedding_dim": config["char_embedding_dim"],
+            "ngram_embedding_dim": config["ngram_embedding_dim"],
+            "hidden_dim": config["hidden_dim"],
+            "num_layers": config["num_layers"],
+            "dropout": config["dropout"]
+        }
+        model = CharNgramBiLSTMClassifier(**model_config)
     else:
         raise ValueError(f"Model {model_name} not implemented yet")
 
@@ -292,6 +354,11 @@ def predict_diacritics(model, lines, vocab, config, diacritic2id, embedder, devi
     """Predict diacritics for undiacritized lines"""
     model.eval()
     predictions = []
+    
+    # Detect model type
+    is_fusion_model = hasattr(model, 'char_embedding') and hasattr(model, 'arabert_projection')
+    is_ngram_classifier = hasattr(model, 'ngram_embedding') and hasattr(model, 'char_embedding')
+    is_simple_classifier = hasattr(model, 'char_embedding') and not hasattr(model, 'arabert_projection') and not hasattr(model, 'ngram_embedding')
 
     for line in tqdm(lines, desc="Predicting"):
         # Remove diacritics from line
@@ -305,6 +372,11 @@ def predict_diacritics(model, lines, vocab, config, diacritic2id, embedder, devi
             emb = embedder.embed_line_chars(undiacritized)
             X_tensor = torch.tensor(emb, dtype=torch.float32).unsqueeze(0).to(device)
             mask = torch.tensor([True] * len(emb), dtype=torch.bool).unsqueeze(0).to(device)
+            
+            # Fusion model needs char_ids too
+            if is_fusion_model:
+                char_ids = vocab.encode(base_chars)
+                char_ids_tensor = torch.tensor(char_ids, dtype=torch.long).unsqueeze(0).to(device)
         else:
             # Encode characters
             X_encoded = vocab.encode(base_chars)
@@ -313,7 +385,30 @@ def predict_diacritics(model, lines, vocab, config, diacritic2id, embedder, devi
             mask = mask_tensor.to(device)
 
         with torch.no_grad():
-            pred = model(X_tensor, mask=mask)
+            if config.get("use_contextual", False) and is_fusion_model:
+                # Fusion model needs both embeddings and char_ids
+                pred = model(X_tensor, char_ids_tensor, mask=mask)
+            elif is_ngram_classifier:
+                # N-gram classifier needs char_ids and ngram_ids
+                char_ids = vocab.encode(base_chars)
+                char_ids_tensor = torch.tensor(char_ids, dtype=torch.long).unsqueeze(0).to(device)
+                # For now, we'll use char_ids as ngram_ids (simplified)
+                ngram_ids_tensor = char_ids_tensor.clone()
+                _, pred = model(char_ids_tensor, ngram_ids_tensor, mask=mask)
+            elif is_simple_classifier:
+                # Simple classifier just needs char_ids
+                _, pred = model(X_tensor, mask=mask)
+            else:
+                # Standard CRF model
+                pred = model(X_tensor, mask=mask)
+
+        # Convert predictions to diacritics
+        if isinstance(pred, list):
+            # CRF models return list of predictions
+            pred_diacritics = [id2diacritic.get(p, '') for p in pred[0][:len(base_chars)]]
+        else:
+            # Classifier models return tensor
+            pred_diacritics = [id2diacritic.get(p.item(), '') for p in pred[0][:len(base_chars)]]
 
         # Convert predictions to diacritics
         pred_diacritics = []
@@ -352,15 +447,16 @@ from src.features.contextual_embeddings import ContextualEmbedder
 
 # Import models
 from src.models.bilstm_crf import BiLSTMCRF
-
 from src.models.arabert_bilstm_crf import AraBERTBiLSTMCRF
 from src.models.arabert_char_bilstm_crf import AraBERTCharBiLSTMCRF
+from src.models.char_bilstm_classifier import CharBiLSTMClassifier
+from src.models.charngram_bilstm_classifier import CharNgramBiLSTMClassifier
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test Arabic Diacritization Models")
     parser.add_argument(
         "--model",
-        choices=["bilstm_crf", "hierarchical_bilstm", "arabert_bilstm_crf", "arabert_char_bilstm_crf"],
+        choices=["bilstm_crf", "hierarchical_bilstm", "arabert_bilstm_crf", "arabert_char_bilstm_crf", "char_bilstm_classifier", "charngram_bilstm_classifier"],
         required=True,
         help="Model name"
     )
