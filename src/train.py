@@ -511,7 +511,7 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
 
     # Create dataloaders
     # Note: batch_size should be reasonable when using contextual embeddings
-    batch_size = DATA_CONFIG['batch_size'] if not config.get("use_contextual", False) else 4
+    batch_size = DATA_CONFIG['batch_size'] if not config.get("use_contextual", False) else 32
     
     # Use custom collate function for contextual embeddings
     collate_fn = collate_contextual_batch if config.get("use_contextual", False) else None
