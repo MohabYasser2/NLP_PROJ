@@ -26,7 +26,7 @@ def remove_diacritics(text):
     return DIACRITICS.sub('', text)
 
 
-def extract_golden_diacritics(input_file, num_lines=None):
+def extract_golden_diacritics(input_file, num_lines=50):
     """
     Extract diacritics from golden diacritized file.
     
@@ -36,8 +36,7 @@ def extract_golden_diacritics(input_file, num_lines=None):
     """
     print(f"Reading golden file: {input_file}")
     with open(input_file, "r", encoding="utf-8") as f:
-        all_lines = [line.strip() for line in f if line.strip()]
-        lines = all_lines[:num_lines] if num_lines else all_lines
+        lines = [line.strip() for line in f if line.strip()][:num_lines]
     
     print(f"Processing {len(lines)} lines...")
     
@@ -128,16 +127,16 @@ def calculate_accuracy(golden, predictions):
 
 
 def main():
-    # Configuration - use validation file
-    golden_file = r"data\val.txt"
-    num_lines = None  # Use all validation lines
+    # Configuration
+    golden_file = r"C:\Users\mohab\Desktop\Uni\Courses\Year 5 -1st term\NLP\Project_new\texts.txt\msa\كتب حديثة\الأصول الثلاثة.txt"
+    num_lines = 50
     model_name = "arabert_char_bilstm_crf"
-    model_path = r"models\best_arabert_char_bilstm_crf (92_bgd).pth"
+    model_path = r"models\best_arabert_char_bilstm_crf.pth"
     
     # Output files
-    undiacritized_file = "sample/val_undiacritized.txt"
-    golden_csv_file = "sample/val_golden.csv"
-    prediction_csv_file = "sample/val_predictions.csv"
+    undiacritized_file = "sample/test_sample_undiacritized.txt"
+    golden_csv_file = "sample/test_sample_golden.csv"
+    prediction_csv_file = "sample/test_sample_predictions.csv"
     
     # Step 1: Extract golden diacritics
     print("\n" + "="*70)

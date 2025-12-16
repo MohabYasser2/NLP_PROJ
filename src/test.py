@@ -465,8 +465,8 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--model_path",
-        default="models/best_arabert_char_bilstm_crf.pth",
-        help="Path to the saved model checkpoint (default: models/best_arabert_char_bilstm_crf.pth)"
+        required=True,
+        help="Path to the saved model checkpoint"
     )
     parser.add_argument(
         "--test_data",
@@ -598,19 +598,17 @@ if __name__ == "__main__":
         char_id = 0
         
         for line_idx, line in enumerate(tqdm(lines, desc="Processing lines")):
-            # Keep original line for embedder (it will strip diacritics internally)
-            # Only extract base_chars for char_ids matching
+            # Remove diacritics from line (if any)
+            undiacritized = remove_diacritics(line)
             
             # Get base characters using tokenize_line (consistent with training)
-            base_chars, _ = tokenize_line(line)
+            base_chars, _ = tokenize_line(undiacritized)
             
             if not base_chars:
                 continue
             
             # For debug mode: track word boundaries for case_ending detection
             if args.competition_debug:
-                # Remove diacritics for position tracking
-                undiacritized = remove_diacritics(line)
                 # Detect word boundaries in the original undiacritized line
                 char_positions = []  # (char, is_word_ending)
                 words = undiacritized.split()
@@ -624,9 +622,8 @@ if __name__ == "__main__":
             
             # Prepare input based on model type
             if config.get("use_contextual", False):
-                # Use embedder on ORIGINAL line (embedder strips diacritics internally)
-                # This matches training behavior where embedder receives diacritized text
-                emb = embedder.embed_line_chars(line)
+                # Use embedder on undiacritized line
+                emb = embedder.embed_line_chars(undiacritized)
                 
                 # For fusion models, we need matching char_ids
                 if is_fusion_model:
