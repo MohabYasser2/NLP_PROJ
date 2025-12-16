@@ -483,8 +483,9 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
     val_dataset = prepare_data(X_val, Y_val, lines_val, vocab, config, diacritic2id, embedder, ngram_extractor)
 
     # Create dataloaders
-    # Note: batch_size should be reasonable when using contextual embeddings
-    batch_size = DATA_CONFIG['batch_size'] if not config.get("use_contextual", False) else 1
+    # Note: Increased batch_size for contextual models (T4 GPU has 15GB memory, we're using only 1.3GB)
+    # Start with 4, can increase to 8-16 if memory allows
+    batch_size = DATA_CONFIG['batch_size'] if not config.get("use_contextual", False) else 4
     
     # Use custom collate function for contextual embeddings
     collate_fn = collate_contextual_batch if config.get("use_contextual", False) else None

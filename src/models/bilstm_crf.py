@@ -54,8 +54,9 @@ class BiLSTMCRF(nn.Module):
             mask_transposed = mask.transpose(0, 1) if mask is not None else None  # (batch, seq) -> (seq, batch)
 
             # CRF returns negative log-likelihood for each sequence in batch
-            # Sum them to get total loss for the batch
-            return -self.crf(emissions_transposed, tags_transposed, mask=mask_transposed).sum()
+            # Normalize by batch size to get average loss per sequence
+            batch_size = emissions.size(0)
+            return -self.crf(emissions_transposed, tags_transposed, mask=mask_transposed).sum() / batch_size
         else:
             # Inference: TorchCRF expects (seq_len, batch_size, num_tags)
             emissions_transposed = emissions.transpose(0, 1)  # (batch, seq, tags) -> (seq, batch, tags)

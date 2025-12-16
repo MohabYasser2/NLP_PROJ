@@ -80,7 +80,9 @@ class AraBERTBiLSTMCRF(nn.Module):
             mask_transposed = mask.transpose(0, 1) if mask is not None else None
 
             # CRF returns negative log-likelihood
-            return -self.crf(emissions_transposed, tags_transposed, mask=mask_transposed).sum()
+            # Normalize by batch size to get average loss per sequence
+            batch_size = emissions.size(0)
+            return -self.crf(emissions_transposed, tags_transposed, mask=mask_transposed).sum() / batch_size
         else:
             # Inference: CRF decoding
             emissions_transposed = emissions.transpose(0, 1)
