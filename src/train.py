@@ -609,7 +609,7 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
         # Training
         model.train()
         train_loss = 0
-        train_samples = 0
+        train_steps = 0
 
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config['num_epochs']}")
         for batch in progress_bar:
@@ -667,14 +667,12 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
 
             optimizer.step()
 
-            # Accumulate loss (already normalized per sample by model)
-            batch_size = y_batch.size(0)
-            train_loss += loss.item() * batch_size
-            train_samples += batch_size
+            train_loss += loss.item()
+            train_steps += 1
 
             progress_bar.set_postfix({"loss": f"{loss.item():.4f}"})
 
-        avg_train_loss = train_loss / train_samples
+        avg_train_loss = train_loss / train_steps
 
         # Conditional validation for speed (only every N epochs, use subset, skip early epochs)
         validation_frequency = EVALUATION_CONFIG.get('validation_frequency', 1)
