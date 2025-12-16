@@ -133,8 +133,8 @@ ARABERT_CHAR_BILSTM_CRF_CONFIG = {
     "gradient_clip": 5.0,
     "use_crf": True,
     "use_contextual": True,  # Uses AraBERT embeddings
-    "batch_size": 64,  # 4x faster training with proper collation
-    "gradient_accumulation_steps": 3,  # Effective batch size: 12
+    "batch_size": 256,  # 4x faster with GPU batching
+    "gradient_accumulation_steps": 2,  # Effective batch size: 256
     "mixed_precision": True  # AMP for additional speedup
 }
 
@@ -178,8 +178,8 @@ SUPERIOR_ARABERT_CHAR_BILSTM_CRF_CONFIG = {
     "gradient_clip": 5.0,
     "use_crf": True,
     "use_contextual": True,
-    "batch_size": 4,  # 4x faster training
-    "gradient_accumulation_steps": 3,  # Effective batch size: 12
+    "batch_size": 16,  # 4x faster with caching
+    "gradient_accumulation_steps": 2,  # Effective batch size: 32
     "mixed_precision": True  # AMP for 2-3x speedup
 }
 
@@ -297,7 +297,10 @@ EVALUATION_CONFIG = {
     "metrics": ["der", "wer", "accuracy"],  # Diacritic Error Rate, Word Error Rate, Accuracy
     "der_threshold": 0.1,  # Consider prediction correct if DER < threshold
     "save_predictions": True,
-    "prediction_path": "predictions/"
+    "prediction_path": "predictions/",
+    "validation_frequency": 1,  # Evaluate every N epochs (1 = every epoch, 2 = every 2 epochs, etc.)
+    "validation_sample_size": None,  # Use subset of validation data (None = all, 500 = first 500 samples)
+    "eval_start_epoch": 1  # Start evaluation from this epoch (skip early epochs)
 }
 
 # ======================================================
