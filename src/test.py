@@ -503,6 +503,11 @@ if __name__ == "__main__":
         default="competition_submission.csv",
         help="Path to save competition CSV output"
     )
+    parser.add_argument(
+        "--competition_debug",
+        action="store_true",
+        help="Include debug columns (line_number, letter, case_ending, predicted_diacritic, gold_diacritic) in competition CSV"
+    )
 
     args = parser.parse_args()
 
@@ -601,6 +606,19 @@ if __name__ == "__main__":
             if not base_chars:
                 continue
             
+            # For debug mode: track word boundaries for case_ending detection
+            if args.competition_debug:
+                # Detect word boundaries in the original undiacritized line
+                char_positions = []  # (char, is_word_ending)
+                words = undiacritized.split()
+                char_idx_in_line = 0
+                for word in words:
+                    for i, ch in enumerate(word):
+                        if is_arabic_base_letter(ch) or is_arabic_digit(ch):
+                            is_word_end = (i == len(word) - 1)
+                            char_positions.append((ch, is_word_end))
+                    char_idx_in_line += len(word) + 1  # +1 for space
+            
             # Prepare input based on model type
             if config.get("use_contextual", False):
                 # Use embedder on undiacritized line
@@ -663,22 +681,60 @@ if __name__ == "__main__":
             else:
                 pred_labels = pred[0][:len(base_chars)].cpu().tolist()
             
-            # Store predictions with IDs
-            for label in pred_labels:
+            # Store predictions with IDs (and debug info if enabled)
+            for idx, label in enumerate(pred_labels):
                 if isinstance(label, torch.Tensor):
                     label = label.item()
-                all_predictions.append((char_id, int(label)))
+                
+                if args.competition_debug:
+                    # Include debug information
+                    if idx < len(char_positions):
+                        char, is_word_end = char_positions[idx]
+                        pred_diacritic = id2diacritic.get(int(label), '')
+                        all_predictions.append({
+                            'id': char_id,
+                            'line_number': line_idx,
+                            'letter': char,
+                            'case_ending': is_word_end,
+                            'label': int(label),
+                            'predicted_diacritic': pred_diacritic
+                        })
+                    else:
+                        all_predictions.append({
+                            'id': char_id,
+                            'line_number': line_idx,
+                            'letter': base_chars[idx] if idx < len(base_chars) else '',
+                            'case_ending': False,
+                            'label': int(label),
+                            'predicted_diacritic': id2diacritic.get(int(label), '')
+                        })
+                else:
+                    # Standard format: just ID and label
+                    all_predictions.append((char_id, int(label)))
+                
                 char_id += 1
         
         # Write to CSV
         print(f"\nSaving competition output to {args.competition_output}...")
         with open(args.competition_output, "w", encoding="utf-8") as f:
-            f.write("ID,label\n")
-            for char_id, label in all_predictions:
-                f.write(f"{char_id},{label}\n")
+            if args.competition_debug:
+                # Debug format with extra columns
+                f.write("id,line_number,letter,case_ending,label,predicted_diacritic\n")
+                for pred_info in all_predictions:
+                    f.write(f"{pred_info['id']},{pred_info['line_number']},{pred_info['letter']},"
+                           f"{pred_info['case_ending']},{pred_info['label']},{pred_info['predicted_diacritic']}\n")
+            else:
+                # Standard format: just ID and label
+                f.write("ID,label\n")
+                for char_id, label in all_predictions:
+                    f.write(f"{char_id},{label}\n")
         
         print("✓ Competition CSV saved!")
         print(f"  Total characters: {len(all_predictions)}")
+        if args.competition_debug:
+            print("  Format: Debug mode with extra columns (line_number, letter, case_ending, predicted_diacritic)")
+        else:
+            print("  Format: Standard competition format (ID, label)")
         print("\n" + "="*70)
         print("COMPETITION MODE COMPLETED!")
         print("="*70)
