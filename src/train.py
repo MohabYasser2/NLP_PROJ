@@ -505,7 +505,10 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
     collate_fn = collate_contextual_batch if config.get("use_contextual", False) else None
     
     # Optimized DataLoader settings for faster training
-    num_workers = 4 if device.type == 'cuda' else 2
+    # Note: num_workers must be 0 for contextual models (CUDA can't be used in forked workers)
+    use_contextual = config.get("use_contextual", False)
+    num_workers = 0 if use_contextual else (4 if device.type == 'cuda' else 2)
+    
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
