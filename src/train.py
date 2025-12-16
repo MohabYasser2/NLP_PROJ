@@ -34,64 +34,53 @@ def set_seed(seed=42):
 
 class ContextualDataset(Dataset):
     """
-    Pre-computed embedding dataset for fast training.
-    Embeddings are computed once during initialization, not per-sample.
+    On-the-fly embedding dataset.
+    Embeddings are computed dynamically in __getitem__ to save memory.
     """
     def __init__(self, X, Y, lines, vocab, config, diacritic2id, embedder):
+        self.lines = lines
         self.vocab = vocab
         self.config = config
         self.diacritic2id = diacritic2id
+        self.embedder = embedder
         
-        # Pre-encode labels
-        Y_encoded = encode_corpus(Y, diacritic2id)
+        # Pre-encode labels for efficiency
+        self.Y_encoded = encode_corpus(Y, diacritic2id)
         
-        # PRE-COMPUTE all embeddings with TRUE GPU BATCHING (10x faster)
-        print(f"Pre-computing embeddings for {len(lines)} samples...")
-        self.embeddings = []
-        self.char_ids_list = []
-        self.labels_list = []
-        self.valid_indices = []
-        
-        from tqdm import tqdm
-        
-        # Process ALL lines at once with GPU batching
-        print("Computing embeddings in one GPU-optimized batch...")
-        all_embeddings = embedder.embed_corpus_chars(lines)
-        
-        print("Extracting character IDs and aligning...")
-        for idx, (line, emb) in enumerate(tqdm(zip(lines, all_embeddings), total=len(lines), desc="Aligning")):
-            # Extract base characters
-            base_chars, _ = tokenize_line(line)
-            char_ids = vocab.encode(base_chars)
-            y_seq = Y_encoded[idx]
-            
-            # Align lengths safely
-            T = min(len(emb), len(char_ids), len(y_seq))
-            
-            # SKIP EMPTY SEQUENCES (prevent RNN error)
-            if T == 0:
-                continue
-            
-            self.embeddings.append(emb[:T])
-            self.char_ids_list.append(char_ids[:T])
-            self.labels_list.append(y_seq[:T])
-            self.valid_indices.append(idx)
-        
-        print(f"✓ All embeddings pre-computed! Valid samples: {len(self.embeddings)}/{len(lines)}")
+        print(f"✓ Dataset initialized with {len(lines)} samples (on-the-fly embedding)")
 
     def __len__(self):
-        return len(self.embeddings)
+        return len(self.lines)
 
     def __getitem__(self, idx):
-        emb = self.embeddings[idx]
-        char_ids = self.char_ids_list[idx]
-        y_seq = self.labels_list[idx]
+        line = self.lines[idx]
+        
+        # Extract base characters (tokenize_line handles diacritics correctly)
+        base_chars, _ = tokenize_line(line)
+        
+        # Skip empty sequences
+        if not base_chars:
+            # Return minimal valid item
+            return {
+                'embedding': torch.zeros((1, 768), dtype=torch.float32),
+                'char_ids': torch.tensor([0], dtype=torch.long),
+                'label': torch.tensor([0], dtype=torch.long),
+                'mask': torch.tensor([False], dtype=torch.bool)
+            }
+        
+        # Compute embedding on-the-fly
+        emb = self.embedder.embed_line_chars(line)
+        char_ids = self.vocab.encode(base_chars)
+        y_seq = self.Y_encoded[idx]
+        
+        # Align lengths
+        T = min(len(emb), len(char_ids), len(y_seq))
         
         return {
-            'embedding': torch.tensor(emb, dtype=torch.float32),      # (T, 768)
-            'char_ids': torch.tensor(char_ids, dtype=torch.long),     # (T,)
-            'label': torch.tensor(y_seq, dtype=torch.long),           # (T,)
-            'mask': torch.tensor([True] * len(emb), dtype=torch.bool) # (T,)
+            'embedding': torch.tensor(emb[:T], dtype=torch.float32),      # (T, 768)
+            'char_ids': torch.tensor(char_ids[:T], dtype=torch.long),     # (T,)
+            'label': torch.tensor(y_seq[:T], dtype=torch.long),           # (T,)
+            'mask': torch.tensor([True] * T, dtype=torch.bool)            # (T,)
         }
 
 
@@ -305,15 +294,12 @@ def calculate_der(predictions, targets, mask):
     return errors / total_chars if total_chars > 0 else 0
 
 
-def evaluate_model(model, lines, Y, vocab, embedder, device, diacritic2id, model_name="bilstm_crf", config=None, 
-                   embeddings_cache=None, char_ids_cache=None):
+def evaluate_model(model, lines, Y, vocab, embedder, device, diacritic2id, model_name="bilstm_crf", config=None):
     """
     Evaluate model on validation set using COMPETITION MODE CSV comparison.
     Generates CSV predictions and compares against golden CSV for exact competition accuracy.
     
-    Args:
-        embeddings_cache: Pre-computed embeddings for fast evaluation (optional)
-        char_ids_cache: Pre-computed char_ids for fast evaluation (optional)
+    Embeddings are computed on-the-fly to save memory.
     """
     model.eval()
     
@@ -348,19 +334,12 @@ def evaluate_model(model, lines, Y, vocab, embedder, device, diacritic2id, model
             
             # Prepare input based on model type
             if config.get("use_contextual", False):
-                # Use cached embeddings if available (MUCH faster)
-                if embeddings_cache is not None and char_ids_cache is not None:
-                    if embeddings_cache[line_idx] is None:
-                        continue
-                    emb = embeddings_cache[line_idx]
-                    char_ids = char_ids_cache[line_idx]
-                else:
-                    # Fallback: compute on-the-fly
-                    emb = embedder.embed_line_chars(line)
-                    char_ids = vocab.encode(base_chars)
-                    min_len = min(len(emb), len(char_ids))
-                    emb = emb[:min_len]
-                    char_ids = char_ids[:min_len]
+                # Compute embeddings on-the-fly
+                emb = embedder.embed_line_chars(line)
+                char_ids = vocab.encode(base_chars)
+                min_len = min(len(emb), len(char_ids))
+                emb = emb[:min_len]
+                char_ids = char_ids[:min_len]
                 
                 # For fusion models, we need matching char_ids
                 if is_fusion_model:
@@ -537,30 +516,6 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
     model = get_model(model_name, config)
     model.to(device)
 
-    # PRE-COMPUTE validation embeddings once for HUGE speedup (if using contextual)
-    val_embeddings_cache = None
-    val_char_ids_cache = None
-    if config.get("use_contextual", False):
-        print("\nPre-computing validation embeddings for fast evaluation...")
-        val_embeddings_cache = []
-        val_char_ids_cache = []
-        for line in tqdm(lines_val, desc="Caching val embeddings"):
-            base_chars, _ = tokenize_line(line)
-            if not base_chars:
-                val_embeddings_cache.append(None)
-                val_char_ids_cache.append(None)
-                continue
-            
-            emb = embedder.embed_line_chars(line)
-            char_ids = vocab.encode(base_chars)
-            
-            # Align lengths
-            min_len = min(len(emb), len(char_ids))
-            val_embeddings_cache.append(emb[:min_len])
-            val_char_ids_cache.append(char_ids[:min_len])
-        
-        print(f"✓ Validation embeddings cached ({len(val_embeddings_cache)} samples)")
-
     # Optimizer and scheduler
     optimizer = torch.optim.Adam(
         model.parameters(),
@@ -584,12 +539,11 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
     
     # Print speed optimization summary
     print("\n" + "="*70)
-    print("SPEED OPTIMIZATIONS ENABLED")
+    print("TRAINING CONFIGURATION")
     print("="*70)
     print(f"✓ Batch size: {config.get('batch_size', 'default')}")
     if config.get("use_contextual", False):
-        print(f"✓ Pre-computed training embeddings: {len(train_dataset)} samples")
-        print(f"✓ Cached validation embeddings: {len(val_embeddings_cache) if val_embeddings_cache else 0} samples")
+        print(f"✓ On-the-fly embeddings: {len(train_dataset)} training samples")
     validation_frequency = EVALUATION_CONFIG.get('validation_frequency', 1)
     validation_sample_size = EVALUATION_CONFIG.get('validation_sample_size', None)
     eval_start_epoch = EVALUATION_CONFIG.get('eval_start_epoch', 1)
@@ -693,9 +647,7 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
             
             # Validation (using competition mode for accurate metrics)
             val_accuracy, val_der = evaluate_model(
-                model, val_lines_subset, val_Y_subset, vocab, embedder, device, diacritic2id, model_name, config,
-                embeddings_cache=val_embeddings_cache[:validation_sample_size] if (val_embeddings_cache and validation_sample_size) else val_embeddings_cache,
-                char_ids_cache=val_char_ids_cache[:validation_sample_size] if (val_char_ids_cache and validation_sample_size) else val_char_ids_cache
+                model, val_lines_subset, val_Y_subset, vocab, embedder, device, diacritic2id, model_name, config
             )
 
             print(f"Epoch {epoch+1}/{config['num_epochs']} | Train Loss: {avg_train_loss:.4f} | Val Accuracy: {val_accuracy:.4f} | DER: {val_der:.4f}")
