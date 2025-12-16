@@ -34,8 +34,8 @@ def set_seed(seed=42):
 
 class ContextualDataset(Dataset):
     """
-    Custom dataset that computes embeddings on-the-fly to save memory.
-    Returns both AraBERT embeddings AND character IDs for fusion models.
+    Pre-computed embedding dataset for fast training.
+    Embeddings are computed once during initialization, not per-sample.
     """
     def __init__(self, X, Y, lines, vocab, config, diacritic2id, embedder):
         self.X = X
@@ -44,24 +44,36 @@ class ContextualDataset(Dataset):
         self.vocab = vocab
         self.config = config
         self.diacritic2id = diacritic2id
-        self.embedder = embedder
         
-        # Pre-encode labels to avoid redundant computation
+        # Pre-encode labels
         self.Y_encoded = encode_corpus(Y, diacritic2id)
+        
+        # PRE-COMPUTE all embeddings and char_ids (10x speedup)
+        print(f"Pre-computing embeddings for {len(lines)} samples...")
+        self.embeddings = []
+        self.char_ids_list = []
+        
+        from tqdm import tqdm
+        for line in tqdm(lines, desc="Computing embeddings"):
+            # Compute embedding once
+            emb = embedder.embed_line_chars(line)
+            
+            # Extract base characters
+            base_chars, _ = tokenize_line(line)
+            char_ids = vocab.encode(base_chars)
+            
+            self.embeddings.append(emb)
+            self.char_ids_list.append(char_ids)
+        
+        print("✓ All embeddings pre-computed and cached in memory!")
 
     def __len__(self):
         return len(self.lines)
 
     def __getitem__(self, idx):
-        line = self.lines[idx]
+        emb = self.embeddings[idx]
+        char_ids = self.char_ids_list[idx]
         y_seq = self.Y_encoded[idx]
-        
-        # 1) Compute AraBERT embedding on-the-fly (per-character)
-        emb = self.embedder.embed_line_chars(line)  # (T, 768)
-        
-        # 2) Extract base characters using tokenize_line (consistent with test.py)
-        base_chars, _ = tokenize_line(line)
-        char_ids = self.vocab.encode(base_chars)  # (T,)
         
         # Align lengths safely
         T = min(len(emb), len(char_ids), len(y_seq))
@@ -476,13 +488,19 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        collate_fn=collate_fn
+        collate_fn=collate_fn,
+        num_workers=2,  # Parallel data loading (2 workers = safe for most systems)
+        pin_memory=True,  # Faster GPU transfer
+        persistent_workers=True  # Keep workers alive between epochs
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        collate_fn=collate_fn
+        collate_fn=collate_fn,
+        num_workers=2,
+        pin_memory=True,
+        persistent_workers=True
     )
 
     # Initialize model
