@@ -306,6 +306,18 @@ def get_model(model_name, config):
             "dropout": config["dropout"]
         }
         model = AraBERTCharBiLSTMCRF(**model_config)
+    elif model_name.lower() == "enhanced_char_bilstm":
+        # Enhanced Character BiLSTM with attention (Improved)
+        model_config = {
+            "vocab_size": config["vocab_size"],
+            "tagset_size": config["tagset_size"],
+            "embedding_dim": config["embedding_dim"],
+            "hidden_dim": config["hidden_dim"],
+            "num_layers": config["num_layers"],
+            "num_heads": config["num_heads"],
+            "dropout": config["dropout"]
+        }
+        model = EnhancedCharBiLSTMClassifier(**model_config)
     elif model_name.lower() == "char_bilstm_classifier":
         # Character-only BiLSTM Classifier (Simple)
         model_config = {
@@ -472,12 +484,13 @@ from src.models.arabert_bilstm_crf import AraBERTBiLSTMCRF
 from src.models.arabert_char_bilstm_crf import AraBERTCharBiLSTMCRF
 from src.models.char_bilstm_classifier import CharBiLSTMClassifier
 from src.models.charngram_bilstm_classifier import CharNgramBiLSTMClassifier
+from src.models.enhanced_char_bilstm import EnhancedCharBiLSTMClassifier
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test Arabic Diacritization Models")
     parser.add_argument(
         "--model",
-        choices=["bilstm_crf", "hierarchical_bilstm", "arabert_bilstm_crf", "arabert_char_bilstm_crf", "char_bilstm_classifier", "charngram_bilstm_classifier"],
+        choices=["bilstm_crf", "hierarchical_bilstm", "arabert_bilstm_crf", "arabert_char_bilstm_crf", "char_bilstm_classifier", "charngram_bilstm_classifier", "enhanced_char_bilstm"],
         required=True,
         help="Model name"
     )

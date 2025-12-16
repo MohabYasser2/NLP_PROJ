@@ -274,7 +274,28 @@ EVALUATION_CONFIG = {
 }
 
 # ======================================================
-# Utility Functions
+# Enhanced Character BiLSTM Classifier (Research-backed improvements)
+# ======================================================
+
+ENHANCED_CHAR_BILSTM_CONFIG = {
+    "vocab_size": None,  # Will be set dynamically
+    "tagset_size": NUM_DIACRITIC_CLASSES,
+    "embedding_dim": 256,  # Increased from 128
+    "hidden_dim": 512,  # Increased from 256
+    "num_layers": 3,  # Increased from 2
+    "num_heads": 8,  # Multi-head attention
+    "dropout": 0.3,  # Reduced (layer norm helps)
+    "learning_rate": 0.0005,  # Lower for deeper model
+    "weight_decay": 1e-5,
+    "num_epochs": 50,
+    "patience": 10,  # More patience for deeper model
+    "gradient_clip": 5.0,
+    "batch_size": 32,
+    "use_contextual": False
+}
+
+# ======================================================
+# Model Configuration Getter
 # ======================================================
 
 def get_model_config(model_name: str):
@@ -288,7 +309,8 @@ def get_model_config(model_name: str):
         "arabert_bilstm_crf": ARABERT_BILSTM_CRF_CONFIG,
         "arabert_char_bilstm_crf": ARABERT_CHAR_BILSTM_CRF_CONFIG,
         "char_bilstm_classifier": CHAR_BILSTM_CLASSIFIER_CONFIG,
-        "charngram_bilstm_classifier": CHARNGRAM_BILSTM_CLASSIFIER_CONFIG
+        "charngram_bilstm_classifier": CHARNGRAM_BILSTM_CLASSIFIER_CONFIG,
+        "enhanced_char_bilstm": ENHANCED_CHAR_BILSTM_CONFIG
     }
     return configs.get(model_name.lower())
 

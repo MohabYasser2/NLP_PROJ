@@ -161,6 +161,7 @@ from src.models.arabert_bilstm_crf import AraBERTBiLSTMCRF
 from src.models.arabert_char_bilstm_crf import AraBERTCharBiLSTMCRF
 from src.models.char_bilstm_classifier import CharBiLSTMClassifier
 from src.models.charngram_bilstm_classifier import CharNgramBiLSTMClassifier
+from src.models.enhanced_char_bilstm import EnhancedCharBiLSTMClassifier
 # TODO: Import other models when implemented
 # from src.models.rnn import RNNModel
 # from src.models.lstm import LSTMModel
@@ -260,6 +261,18 @@ def get_model(model_name, config):
             "dropout": config["dropout"]
         }
         model = AraBERTCharBiLSTMCRF(**model_config)
+    elif model_name.lower() == "enhanced_char_bilstm":
+        # Enhanced Character BiLSTM with attention (Improved)
+        model_config = {
+            "vocab_size": config["vocab_size"],
+            "tagset_size": config["tagset_size"],
+            "embedding_dim": config["embedding_dim"],
+            "hidden_dim": config["hidden_dim"],
+            "num_layers": config["num_layers"],
+            "num_heads": config["num_heads"],
+            "dropout": config["dropout"]
+        }
+        model = EnhancedCharBiLSTMClassifier(**model_config)
     elif model_name.lower() == "char_bilstm_classifier":
         # Character-only BiLSTM Classifier (Simple)
         model_config = {
@@ -315,7 +328,7 @@ def evaluate_model(model, dataloader, device, diacritic2id, model_name="bilstm_c
     # Check model type
     is_fusion_model = model_name.lower() == "arabert_char_bilstm_crf"
     is_ngram_classifier = model_name.lower() == "charngram_bilstm_classifier"
-    is_simple_classifier = model_name.lower() == "char_bilstm_classifier"
+    is_simple_classifier = model_name.lower() in ["char_bilstm_classifier", "enhanced_char_bilstm"]
 
     with torch.no_grad():
         for batch in dataloader:
@@ -529,9 +542,10 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
     patience_counter = 0
     
     # Check model type for appropriate handling
+    # Model type detection
     is_fusion_model = model_name.lower() == "arabert_char_bilstm_crf"
     is_ngram_classifier = model_name.lower() == "charngram_bilstm_classifier"
-    is_simple_classifier = model_name.lower() == "char_bilstm_classifier"
+    is_simple_classifier = model_name.lower() in ["char_bilstm_classifier", "enhanced_char_bilstm"]
 
     for epoch in range(config["num_epochs"]):
         # Training
@@ -645,7 +659,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Arabic Diacritization Models")
     parser.add_argument(
         "--model",
-        choices=["rnn", "lstm", "crf", "bilstm_crf", "hierarchical_bilstm", "arabert_bilstm_crf", "arabert_char_bilstm_crf", "char_bilstm_classifier", "charngram_bilstm_classifier"],
+        choices=["rnn", "lstm", "crf", "bilstm_crf", "hierarchical_bilstm", "arabert_bilstm_crf", "arabert_char_bilstm_crf", "char_bilstm_classifier", "charngram_bilstm_classifier", "enhanced_char_bilstm"],
         default="bilstm_crf",
         help="Model to train"
     )
