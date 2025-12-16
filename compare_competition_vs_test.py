@@ -132,7 +132,7 @@ def main():
     golden_file = r"data\val.txt"
     num_lines = None  # Use all validation lines
     model_name = "arabert_char_bilstm_crf"
-    model_path = r"models\best_arabert_char_bilstm_crf ().pth"
+    model_path = r"models\best_arabert_char_bilstm_crf (99_36).pth"
     
     # Output files
     undiacritized_file = "sample/val_undiacritized.txt"

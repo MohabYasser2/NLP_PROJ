@@ -454,12 +454,11 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
         embedder = ContextualEmbedder(
             model_name="aubmindlab/bert-base-arabertv02",
             device=device.type,
-            cache_dir="data/processed/contextual_cache"  # Enable caching for 10x speedup
+            cache_dir=None  # Disable disk caching (use in-memory only) to avoid Kaggle disk space issues
         )
         # Update embedding_dim for contextual
         config["embedding_dim"] = embedder.hidden_size
         print(f"✓ AraBERT loaded (hidden_size={embedder.hidden_size})")
-        print(f"✓ Caching enabled at: data/processed/contextual_cache")
 
     # Build vocabulary from training data ONLY (no data leakage)
     print("\nBuilding vocabulary...")
