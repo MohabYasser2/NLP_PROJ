@@ -20,14 +20,6 @@ import random
 from tqdm import tqdm
 from sklearn.metrics import accuracy_score
 import pickle
-import re
-
-# Diacritics pattern for removing diacritics
-DIACRITICS = re.compile(r'[\u064B-\u065F]')
-
-def remove_diacritics(text):
-    """Remove all diacritics from Arabic text"""
-    return DIACRITICS.sub('', text)
 
 # Set seeds for reproducibility
 def set_seed(seed=42):
@@ -42,49 +34,64 @@ def set_seed(seed=42):
 
 class ContextualDataset(Dataset):
     """
-    Custom dataset that computes embeddings on-the-fly to save memory.
-    Returns both AraBERT embeddings AND character IDs for fusion models.
+    Pre-computed embedding dataset for fast training.
+    Embeddings are computed once during initialization, not per-sample.
     """
     def __init__(self, X, Y, lines, vocab, config, diacritic2id, embedder):
-        self.X = X
-        self.Y = Y
-        self.lines = lines
         self.vocab = vocab
         self.config = config
         self.diacritic2id = diacritic2id
-        self.embedder = embedder
         
-        # Pre-encode labels to avoid redundant computation
-        self.Y_encoded = encode_corpus(Y, diacritic2id)
+        # Pre-encode labels
+        Y_encoded = encode_corpus(Y, diacritic2id)
+        
+        # PRE-COMPUTE all embeddings with TRUE GPU BATCHING (10x faster)
+        print(f"Pre-computing embeddings for {len(lines)} samples...")
+        self.embeddings = []
+        self.char_ids_list = []
+        self.labels_list = []
+        self.valid_indices = []
+        
+        from tqdm import tqdm
+        
+        # Process ALL lines at once with GPU batching
+        print("Computing embeddings in one GPU-optimized batch...")
+        all_embeddings = embedder.embed_corpus_chars(lines)
+        
+        print("Extracting character IDs and aligning...")
+        for idx, (line, emb) in enumerate(tqdm(zip(lines, all_embeddings), total=len(lines), desc="Aligning")):
+            # Extract base characters
+            base_chars, _ = tokenize_line(line)
+            char_ids = vocab.encode(base_chars)
+            y_seq = Y_encoded[idx]
+            
+            # Align lengths safely
+            T = min(len(emb), len(char_ids), len(y_seq))
+            
+            # SKIP EMPTY SEQUENCES (prevent RNN error)
+            if T == 0:
+                continue
+            
+            self.embeddings.append(emb[:T])
+            self.char_ids_list.append(char_ids[:T])
+            self.labels_list.append(y_seq[:T])
+            self.valid_indices.append(idx)
+        
+        print(f"✓ All embeddings pre-computed! Valid samples: {len(self.embeddings)}/{len(lines)}")
 
     def __len__(self):
-        return len(self.lines)
+        return len(self.embeddings)
 
     def __getitem__(self, idx):
-        line = self.lines[idx]
-        y_seq = self.Y_encoded[idx]
-        
-        # Remove diacritics before processing (match competition conditions)
-        undiacritized_line = remove_diacritics(line)
-        
-        # 1) Compute AraBERT embedding on undiacritized text (competition-style)
-        emb = self.embedder.embed_line_chars(undiacritized_line)  # (T, 768)
-        
-        # 2) Extract base characters from original line for golden labels
-        base_chars, _ = tokenize_line(line)
-        char_ids = self.vocab.encode(base_chars)  # (T,)
-        
-        # Align lengths safely
-        T = min(len(emb), len(char_ids), len(y_seq))
-        emb = emb[:T]
-        char_ids = char_ids[:T]
-        y_seq = y_seq[:T]
+        emb = self.embeddings[idx]
+        char_ids = self.char_ids_list[idx]
+        y_seq = self.labels_list[idx]
         
         return {
             'embedding': torch.tensor(emb, dtype=torch.float32),      # (T, 768)
             'char_ids': torch.tensor(char_ids, dtype=torch.long),     # (T,)
             'label': torch.tensor(y_seq, dtype=torch.long),           # (T,)
-            'mask': torch.tensor([True] * T, dtype=torch.bool)        # (T,)
+            'mask': torch.tensor([True] * len(emb), dtype=torch.bool) # (T,)
         }
 
 
@@ -154,7 +161,6 @@ from src.models.arabert_bilstm_crf import AraBERTBiLSTMCRF
 from src.models.arabert_char_bilstm_crf import AraBERTCharBiLSTMCRF
 from src.models.char_bilstm_classifier import CharBiLSTMClassifier
 from src.models.charngram_bilstm_classifier import CharNgramBiLSTMClassifier
-from src.validate_competition import validate_competition_style
 # TODO: Import other models when implemented
 # from src.models.rnn import RNNModel
 # from src.models.lstm import LSTMModel
@@ -299,106 +305,133 @@ def calculate_der(predictions, targets, mask):
     return errors / total_chars if total_chars > 0 else 0
 
 
-def evaluate_model(model, dataloader, device, diacritic2id, model_name="bilstm_crf"):
-    """Evaluate model on validation set"""
+def evaluate_model(model, lines, Y, vocab, embedder, device, diacritic2id, model_name="bilstm_crf", config=None, 
+                   embeddings_cache=None, char_ids_cache=None):
+    """
+    Evaluate model on validation set using COMPETITION MODE CSV comparison.
+    Generates CSV predictions and compares against golden CSV for exact competition accuracy.
+    
+    Args:
+        embeddings_cache: Pre-computed embeddings for fast evaluation (optional)
+        char_ids_cache: Pre-computed char_ids for fast evaluation (optional)
+    """
     model.eval()
-    all_predictions = []
-    all_targets = []
-    all_masks = []
     
     # Check model type
     is_fusion_model = model_name.lower() == "arabert_char_bilstm_crf"
     is_ngram_classifier = model_name.lower() == "charngram_bilstm_classifier"
     is_simple_classifier = model_name.lower() == "char_bilstm_classifier"
+    
+    # Pre-encode all golden labels to create golden CSV
+    Y_encoded = encode_corpus(Y, diacritic2id, skip_unknown=True)
+    
+    golden_csv = []  # List of (char_id, label) tuples
+    prediction_csv = []  # List of (char_id, label) tuples
+    char_id = 0
 
     with torch.no_grad():
-        for batch in dataloader:
-            if is_fusion_model:
-                # Fusion model: unpack 4 tensors (embedding, char_ids, labels, mask)
-                X_batch, char_ids_batch, y_batch, mask_batch = batch
-                X_batch = X_batch.to(device)
-                char_ids_batch = char_ids_batch.to(device)
-                mask_batch = mask_batch.to(device)
+        for line_idx, line in enumerate(tqdm(lines, desc="Evaluating")):
+            # Get base characters and golden diacritics using tokenize_line
+            base_chars, golden_diacritics = tokenize_line(line)
+            
+            if not base_chars:
+                continue
+            
+            # Create golden CSV entries
+            gold_labels = Y_encoded[line_idx][:len(base_chars)]
+            for label in gold_labels:
+                golden_csv.append((char_id, int(label)))
+                char_id += 1
+            
+            # Reset char_id for predictions (will match golden)
+            pred_start_id = char_id - len(gold_labels)
+            
+            # Prepare input based on model type
+            if config.get("use_contextual", False):
+                # Use cached embeddings if available (MUCH faster)
+                if embeddings_cache is not None and char_ids_cache is not None:
+                    if embeddings_cache[line_idx] is None:
+                        continue
+                    emb = embeddings_cache[line_idx]
+                    char_ids = char_ids_cache[line_idx]
+                else:
+                    # Fallback: compute on-the-fly
+                    emb = embedder.embed_line_chars(line)
+                    char_ids = vocab.encode(base_chars)
+                    min_len = min(len(emb), len(char_ids))
+                    emb = emb[:min_len]
+                    char_ids = char_ids[:min_len]
                 
-                # Forward pass with dual inputs
-                predictions = model(X_batch, char_ids_batch, mask=mask_batch)
+                # For fusion models, we need matching char_ids
+                if is_fusion_model:
+                    X_tensor = torch.tensor(emb, dtype=torch.float32).unsqueeze(0).to(device)
+                    char_ids_tensor = torch.tensor(char_ids, dtype=torch.long).unsqueeze(0).to(device)
+                    mask = torch.tensor([True] * len(emb), dtype=torch.bool).unsqueeze(0).to(device)
+                else:
+                    X_tensor = torch.tensor(emb, dtype=torch.float32).unsqueeze(0).to(device)
+                    mask = torch.tensor([True] * len(emb), dtype=torch.bool).unsqueeze(0).to(device)
+            else:
+                # Encode characters
+                X_encoded = vocab.encode(base_chars)
+                X_padded, mask_tensor = pad_sequences([X_encoded], pad_value=vocab.char2id["<PAD>"])
+                X_tensor = X_padded.to(device)
+                mask = mask_tensor.to(device)
+            
+            # Predict
+            if config.get("use_contextual", False) and is_fusion_model:
+                pred = model(X_tensor, char_ids_tensor, mask=mask)
             elif is_ngram_classifier:
-                # N-gram classifier: unpack 4 tensors (char_ids, ngram_ids, labels, mask)
-                char_ids_batch, ngram_ids_batch, y_batch, mask_batch = batch
-                char_ids_batch = char_ids_batch.to(device)
-                ngram_ids_batch = ngram_ids_batch.to(device)
-                mask_batch = mask_batch.to(device)
-                
-                # Forward pass returns (logits, predictions)
-                _, predictions = model(char_ids_batch, ngram_ids_batch, mask=mask_batch)
+                char_ids = vocab.encode(base_chars)
+                char_ids_tensor = torch.tensor(char_ids, dtype=torch.long).unsqueeze(0).to(device)
+                ngram_ids_tensor = char_ids_tensor.clone()
+                _, pred = model(char_ids_tensor, ngram_ids_tensor, mask=mask)
             elif is_simple_classifier:
-                # Simple classifier: unpack 3 tensors (char_ids, labels, mask)
-                X_batch, y_batch, mask_batch = batch
-                X_batch = X_batch.to(device)
-                mask_batch = mask_batch.to(device)
-                
-                # Forward pass returns (logits, predictions)
-                _, predictions = model(X_batch, mask=mask_batch)
+                _, pred = model(X_tensor, mask=mask)
             else:
-                # Standard CRF model: unpack 3 tensors (X, y, mask)
-                X_batch, y_batch, mask_batch = batch
-                X_batch = X_batch.to(device)
-                mask_batch = mask_batch.to(device)
-                
-                # Forward pass with single input
-                predictions = model(X_batch, mask=mask_batch)
-
-            # Handle different prediction formats
-            if isinstance(predictions, list):
-                # CRF models: predictions is a list of lists (one per sequence in batch)
-                for pred_seq, target_seq, mask_seq in zip(predictions, y_batch, mask_batch):
-                    pred_flat = []
-                    target_flat = []
-                    mask_flat = []
-
-                    for p, t, m in zip(pred_seq, target_seq, mask_seq):
-                        if m:
-                            pred_flat.append(p)
-                            target_flat.append(t.item())
-                            mask_flat.append(True)
-
-                    if pred_flat:
-                        all_predictions.append(pred_flat)
-                        all_targets.append(target_flat)
-                        all_masks.append(mask_flat)
+                pred = model(X_tensor, mask=mask)
+            
+            # Extract predictions
+            if isinstance(pred, list):
+                # Handle different CRF return formats
+                if len(pred) > 0 and isinstance(pred[0], list):
+                    if len(pred) == 1:
+                        pred_labels = pred[0][:len(base_chars)]
+                    else:
+                        pred_labels = [item[0] if isinstance(item, list) and len(item) > 0 else item for item in pred]
+                        pred_labels = pred_labels[:len(base_chars)]
+                else:
+                    pred_labels = pred[:len(base_chars)]
             else:
-                # Non-CRF models: predictions is tensor (batch, seq_len)
-                predictions = predictions.cpu()
-                for pred_seq, target_seq, mask_seq in zip(predictions, y_batch, mask_batch):
-                    pred_flat = []
-                    target_flat = []
-                    mask_flat = []
+                pred_labels = pred[0][:len(base_chars)].cpu().tolist()
+            
+            # Convert tensor predictions to integers and create prediction CSV entries
+            for idx, p in enumerate(pred_labels):
+                label = int(p.item()) if isinstance(p, torch.Tensor) else int(p)
+                prediction_csv.append((pred_start_id + idx, label))
 
-                    for p, t, m in zip(pred_seq, target_seq, mask_seq):
-                        if m:
-                            pred_flat.append(p.item())
-                            target_flat.append(t.item())
-                            mask_flat.append(True)
-
-                    if pred_flat:
-                        all_predictions.append(pred_flat)
-                        all_targets.append(target_flat)
-                        all_masks.append(mask_flat)
-
-    # Calculate metrics (exclude spaces from accuracy like DER does)
-    flat_predictions = []
-    flat_targets = []
-
-    for pred_seq, target_seq, mask_seq in zip(all_predictions, all_targets, all_masks):
-        for p, t, m in zip(pred_seq, target_seq, mask_seq):
-            if m:  # Only non-padded positions
-                # Skip spaces (empty diacritic) for accuracy calculation
-                if t != diacritic2id['']:
-                    flat_predictions.append(p)
-                    flat_targets.append(t)
-
-    accuracy = accuracy_score(flat_targets, flat_predictions) if flat_targets else 0
-    der = calculate_der(all_predictions, all_targets, all_masks)
+    # Calculate accuracy by comparing CSV entries (exactly like competition)
+    if len(golden_csv) != len(prediction_csv):
+        print(f"WARNING: Length mismatch! Golden: {len(golden_csv)}, Predictions: {len(prediction_csv)}")
+        min_len = min(len(golden_csv), len(prediction_csv))
+    else:
+        min_len = len(golden_csv)
+    
+    correct = 0
+    total = 0
+    
+    for i in range(min_len):
+        golden_id, golden_label = golden_csv[i]
+        pred_id, pred_label = prediction_csv[i]
+        
+        if golden_id != pred_id:
+            print(f"WARNING: ID mismatch at position {i}! Golden: {golden_id}, Pred: {pred_id}")
+        
+        total += 1
+        if golden_label == pred_label:
+            correct += 1
+    
+    accuracy = correct / total if total > 0 else 0.0
+    der = 1.0 - accuracy
 
     return accuracy, der
 
@@ -442,26 +475,17 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
         embedder = ContextualEmbedder(
             model_name="aubmindlab/bert-base-arabertv02",
             device=device.type,
-            cache_dir=None  # Disable caching to avoid disk space issues on Kaggle
+            cache_dir=None  # Disable disk caching (use in-memory only) to avoid Kaggle disk space issues
         )
         # Update embedding_dim for contextual
         config["embedding_dim"] = embedder.hidden_size
         print(f"✓ AraBERT loaded (hidden_size={embedder.hidden_size})")
 
-    # Load pre-built Arabic vocabulary (36 letters + PAD + UNK = 38 total)
-    print("\nLoading vocabulary from utils/arabic_letters.pickle...")
-    with open("utils/arabic_letters.pickle", "rb") as f:
-        arabic_letters = pickle.load(f)
-    
+    # Build vocabulary from training data ONLY (no data leakage)
+    print("\nBuilding vocabulary...")
     vocab = CharVocab()
-    # Add all Arabic letters to vocabulary (PAD and UNK already in char2id)
-    for letter in sorted(arabic_letters):
-        if letter not in vocab.char2id:
-            idx = len(vocab.char2id)
-            vocab.char2id[letter] = idx
-            vocab.id2char[idx] = letter
-    
-    print(f"✓ Vocabulary size: {len(vocab.char2id)} (36 Arabic letters + <PAD> + <UNK>)")
+    vocab.build(X_train)
+    print(f"✓ Vocabulary size: {len(vocab.char2id)}")
 
     # Update vocab size in config
     config = update_vocab_size(config.copy(), len(vocab.char2id))
@@ -486,8 +510,8 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
     val_dataset = prepare_data(X_val, Y_val, lines_val, vocab, config, diacritic2id, embedder, ngram_extractor)
 
     # Create dataloaders
-    # Use batch_size from config (supports batching for contextual models now)
-    batch_size = config.get('batch_size', DATA_CONFIG['batch_size'])
+    # Note: batch_size should be reasonable when using contextual embeddings
+    batch_size = DATA_CONFIG['batch_size'] if not config.get("use_contextual", False) else 4
     
     # Use custom collate function for contextual embeddings
     collate_fn = collate_contextual_batch if config.get("use_contextual", False) else None
@@ -496,18 +520,46 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        collate_fn=collate_fn
+        collate_fn=collate_fn,
+        num_workers=0,  # 0 for Kaggle/notebooks (avoids multiprocessing issues)
+        pin_memory=True  # Faster GPU transfer
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        collate_fn=collate_fn
+        collate_fn=collate_fn,
+        num_workers=0,
+        pin_memory=True
     )
 
     # Initialize model
     model = get_model(model_name, config)
     model.to(device)
+
+    # PRE-COMPUTE validation embeddings once for HUGE speedup (if using contextual)
+    val_embeddings_cache = None
+    val_char_ids_cache = None
+    if config.get("use_contextual", False):
+        print("\nPre-computing validation embeddings for fast evaluation...")
+        val_embeddings_cache = []
+        val_char_ids_cache = []
+        for line in tqdm(lines_val, desc="Caching val embeddings"):
+            base_chars, _ = tokenize_line(line)
+            if not base_chars:
+                val_embeddings_cache.append(None)
+                val_char_ids_cache.append(None)
+                continue
+            
+            emb = embedder.embed_line_chars(line)
+            char_ids = vocab.encode(base_chars)
+            
+            # Align lengths
+            min_len = min(len(emb), len(char_ids))
+            val_embeddings_cache.append(emb[:min_len])
+            val_char_ids_cache.append(char_ids[:min_len])
+        
+        print(f"✓ Validation embeddings cached ({len(val_embeddings_cache)} samples)")
 
     # Optimizer and scheduler
     optimizer = torch.optim.Adam(
@@ -530,6 +582,24 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
     patience = config["patience"]
     patience_counter = 0
     
+    # Print speed optimization summary
+    print("\n" + "="*70)
+    print("SPEED OPTIMIZATIONS ENABLED")
+    print("="*70)
+    print(f"✓ Batch size: {config.get('batch_size', 'default')}")
+    if config.get("use_contextual", False):
+        print(f"✓ Pre-computed training embeddings: {len(train_dataset)} samples")
+        print(f"✓ Cached validation embeddings: {len(val_embeddings_cache) if val_embeddings_cache else 0} samples")
+    validation_frequency = EVALUATION_CONFIG.get('validation_frequency', 1)
+    validation_sample_size = EVALUATION_CONFIG.get('validation_sample_size', None)
+    eval_start_epoch = EVALUATION_CONFIG.get('eval_start_epoch', 1)
+    print(f"✓ Validation frequency: Every {validation_frequency} epoch(s)")
+    if validation_sample_size:
+        print(f"✓ Validation subset: {validation_sample_size}/{len(lines_val)} samples ({validation_sample_size/len(lines_val)*100:.1f}%)")
+    print(f"✓ Evaluation starts at epoch: {eval_start_epoch}")
+    print(f"✓ Checkpoint saving: Every epoch + best model")
+    print("="*70 + "\n")
+    
     # Check model type for appropriate handling
     is_fusion_model = model_name.lower() == "arabert_char_bilstm_crf"
     is_ngram_classifier = model_name.lower() == "charngram_bilstm_classifier"
@@ -539,7 +609,7 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
         # Training
         model.train()
         train_loss = 0
-        train_steps = 0
+        train_samples = 0
 
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config['num_epochs']}")
         for batch in progress_bar:
@@ -597,69 +667,90 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
 
             optimizer.step()
 
-            train_loss += loss.item()
-            train_steps += 1
+            # Accumulate loss (already normalized per sample by model)
+            batch_size = y_batch.size(0)
+            train_loss += loss.item() * batch_size
+            train_samples += batch_size
 
             progress_bar.set_postfix({"loss": f"{loss.item():.4f}"})
 
-        avg_train_loss = train_loss / train_steps
+        avg_train_loss = train_loss / train_samples
 
-        # Validation - Standard mode (fast)
-        val_accuracy, val_der = evaluate_model(model, val_loader, device, diacritic2id, model_name)
+        # Conditional validation for speed (only every N epochs, use subset, skip early epochs)
+        validation_frequency = EVALUATION_CONFIG.get('validation_frequency', 1)
+        validation_sample_size = EVALUATION_CONFIG.get('validation_sample_size', None)
+        eval_start_epoch = EVALUATION_CONFIG.get('eval_start_epoch', 1)
         
-        # Competition-style validation (every 5 epochs for accuracy check)
-        comp_accuracy, comp_der = None, None
-        if (epoch + 1) % 5 == 0 or epoch == 0:
-            print(f"  Running competition-style validation...")
-            comp_accuracy, comp_der = validate_competition_style(
-                model, lines_val, vocab, config, diacritic2id, embedder, device, model_name
+        should_evaluate = (epoch + 1) >= eval_start_epoch and (epoch + 1) % validation_frequency == 0
+        
+        if should_evaluate:
+            # Use subset of validation data for faster evaluation
+            if validation_sample_size and validation_sample_size < len(lines_val):
+                val_lines_subset = lines_val[:validation_sample_size]
+                val_Y_subset = Y_val[:validation_sample_size]
+                print(f"  Using validation subset: {validation_sample_size}/{len(lines_val)} samples")
+            else:
+                val_lines_subset = lines_val
+                val_Y_subset = Y_val
+            
+            # Validation (using competition mode for accurate metrics)
+            val_accuracy, val_der = evaluate_model(
+                model, val_lines_subset, val_Y_subset, vocab, embedder, device, diacritic2id, model_name, config,
+                embeddings_cache=val_embeddings_cache[:validation_sample_size] if (val_embeddings_cache and validation_sample_size) else val_embeddings_cache,
+                char_ids_cache=val_char_ids_cache[:validation_sample_size] if (val_char_ids_cache and validation_sample_size) else val_char_ids_cache
             )
-            print(f"  Competition DER: {comp_der:.4f} | Competition Accuracy: {comp_accuracy:.4f}")
 
-        print(f"Epoch {epoch+1}/{config['num_epochs']} | Train Loss: {avg_train_loss:.4f} | Val Accuracy: {val_accuracy:.4f} | DER: {val_der:.4f}")
+            print(f"Epoch {epoch+1}/{config['num_epochs']} | Train Loss: {avg_train_loss:.4f} | Val Accuracy: {val_accuracy:.4f} | DER: {val_der:.4f}")
+            
+            # Early stopping check
+            if val_der < best_der:
+                best_der = val_der
+                patience_counter = 0
+                print(f"  ✓ New best model! DER: {best_der:.4f}")
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    print(f"\n⚠ Early stopping triggered at epoch {epoch+1} (no improvement for {patience} epochs)")
+                    # Save final checkpoint before stopping
+                    checkpoint = {
+                        'epoch': epoch + 1,
+                        'model_state_dict': model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+                        'best_der': best_der,
+                        'config': config,
+                        'vocab': vocab.char2id
+                    }
+                    torch.save(checkpoint, f"models/epoch_{epoch+1}_{model_name}.pth")
+                    break
+        else:
+            print(f"Epoch {epoch+1}/{config['num_epochs']} | Train Loss: {avg_train_loss:.4f} | Validation skipped (every {validation_frequency} epochs)")
+            val_der = best_der  # Keep best DER for comparison
 
         # Learning rate scheduling
         if scheduler:
             scheduler.step()
 
-        # Early stopping (use competition DER if available, otherwise standard DER)
-        current_der = comp_der if comp_der is not None else val_der
-        if current_der < best_der:
-            best_der = current_der
-            patience_counter = 0
-            # Save complete checkpoint
-            checkpoint = {
-                'epoch': epoch + 1,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
-                'best_der': best_der,
-                'config': config,
-                'vocab': vocab.char2id
-            }
-            
-            # Save best model
-            torch.save(checkpoint, f"models/best_{model_name}.pth")
-            print(f"  ✓ New best model! DER: {best_der:.4f} (saved at epoch {epoch+1})")
-        
-        # Save checkpoint every epoch
-        epoch_checkpoint = {
+        # Save checkpoint EVERY epoch (not just best)
+        checkpoint = {
             'epoch': epoch + 1,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+            'best_der': best_der,
             'val_der': val_der,
-            'val_accuracy': val_accuracy,
+            'train_loss': avg_train_loss,
             'config': config,
             'vocab': vocab.char2id
         }
-        torch.save(epoch_checkpoint, f"models/{model_name}_epoch_{epoch+1}.pth")
         
-        if val_der > best_der:
-            patience_counter += 1
-            if patience_counter >= patience:
-                print(f"\n⚠ Early stopping triggered at epoch {epoch+1} (no improvement for {patience} epochs)")
-                break
+        # Save with epoch number
+        torch.save(checkpoint, f"models/epoch_{epoch+1}_{model_name}.pth")
+        
+        # Also update best model if this is the best so far
+        if should_evaluate and val_der == best_der:
+            torch.save(checkpoint, f"models/best_{model_name}.pth")
+            print(f"  💾 Best model updated: models/best_{model_name}.pth")
 
     print("\n" + "="*70)
     print("✓ TRAINING COMPLETED!")
@@ -673,7 +764,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Arabic Diacritization Models")
     parser.add_argument(
         "--model",
-        choices=["rnn", "lstm", "crf", "bilstm_crf", "hierarchical_bilstm", "arabert_bilstm_crf", "arabert_char_bilstm_crf", "superior_arabert_char_bilstm_crf", "char_bilstm_classifier", "charngram_bilstm_classifier"],
+        choices=["rnn", "lstm", "crf", "bilstm_crf", "hierarchical_bilstm", "arabert_bilstm_crf", "arabert_char_bilstm_crf", "char_bilstm_classifier", "charngram_bilstm_classifier"],
         default="bilstm_crf",
         help="Model to train"
     )

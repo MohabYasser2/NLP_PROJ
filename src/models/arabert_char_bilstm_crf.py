@@ -124,8 +124,9 @@ class AraBERTCharBiLSTMCRF(nn.Module):
             tags_t = tags.transpose(0, 1)  # (seq, batch)
             mask_t = mask.transpose(0, 1) if mask is not None else None  # (seq, batch)
             
-            # CRF returns negative log-likelihood per sequence
-            loss = -self.crf(emissions_t, tags_t, mask=mask_t).sum()
+            # CRF returns negative log-likelihood per sequence, normalize by batch size
+            batch_size = emissions.size(0)
+            loss = -self.crf(emissions_t, tags_t, mask=mask_t).sum() / batch_size
             return loss
         else:
             # Inference: Viterbi decoding
