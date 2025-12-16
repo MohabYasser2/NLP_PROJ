@@ -133,8 +133,8 @@ ARABERT_CHAR_BILSTM_CRF_CONFIG = {
     "gradient_clip": 5.0,
     "use_crf": True,
     "use_contextual": True,  # Uses AraBERT embeddings
-    "batch_size": 4,  # 4x faster training with proper collation
-    "gradient_accumulation_steps": 3,  # Effective batch size: 12
+    "batch_size": 16,  # 4x faster with caching enabled
+    "gradient_accumulation_steps": 2,  # Effective batch size: 32
     "mixed_precision": True  # AMP for additional speedup
 }
 
@@ -178,8 +178,8 @@ SUPERIOR_ARABERT_CHAR_BILSTM_CRF_CONFIG = {
     "gradient_clip": 5.0,
     "use_crf": True,
     "use_contextual": True,
-    "batch_size": 4,  # 4x faster training
-    "gradient_accumulation_steps": 3,  # Effective batch size: 12
+    "batch_size": 16,  # 4x faster with caching
+    "gradient_accumulation_steps": 2,  # Effective batch size: 32
     "mixed_precision": True  # AMP for 2-3x speedup
 }
 
