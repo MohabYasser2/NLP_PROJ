@@ -1,2 +1,4 @@
 *.npy
 texts.txt/
+*.pyc
+*.pth
