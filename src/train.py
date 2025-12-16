@@ -38,54 +38,57 @@ class ContextualDataset(Dataset):
     Embeddings are computed once during initialization, not per-sample.
     """
     def __init__(self, X, Y, lines, vocab, config, diacritic2id, embedder):
-        self.X = X
-        self.Y = Y
-        self.lines = lines
         self.vocab = vocab
         self.config = config
         self.diacritic2id = diacritic2id
         
         # Pre-encode labels
-        self.Y_encoded = encode_corpus(Y, diacritic2id)
+        Y_encoded = encode_corpus(Y, diacritic2id)
         
         # PRE-COMPUTE all embeddings and char_ids (10x speedup)
         print(f"Pre-computing embeddings for {len(lines)} samples...")
         self.embeddings = []
         self.char_ids_list = []
+        self.labels_list = []
+        self.valid_indices = []
         
         from tqdm import tqdm
-        for line in tqdm(lines, desc="Computing embeddings"):
+        for idx, line in enumerate(tqdm(lines, desc="Computing embeddings")):
             # Compute embedding once
             emb = embedder.embed_line_chars(line)
             
             # Extract base characters
             base_chars, _ = tokenize_line(line)
             char_ids = vocab.encode(base_chars)
+            y_seq = Y_encoded[idx]
             
-            self.embeddings.append(emb)
-            self.char_ids_list.append(char_ids)
+            # Align lengths safely
+            T = min(len(emb), len(char_ids), len(y_seq))
+            
+            # SKIP EMPTY SEQUENCES (prevent RNN error)
+            if T == 0:
+                continue
+            
+            self.embeddings.append(emb[:T])
+            self.char_ids_list.append(char_ids[:T])
+            self.labels_list.append(y_seq[:T])
+            self.valid_indices.append(idx)
         
-        print("✓ All embeddings pre-computed and cached in memory!")
+        print(f"✓ All embeddings pre-computed! Valid samples: {len(self.embeddings)}/{len(lines)}")
 
     def __len__(self):
-        return len(self.lines)
+        return len(self.embeddings)
 
     def __getitem__(self, idx):
         emb = self.embeddings[idx]
         char_ids = self.char_ids_list[idx]
-        y_seq = self.Y_encoded[idx]
-        
-        # Align lengths safely
-        T = min(len(emb), len(char_ids), len(y_seq))
-        emb = emb[:T]
-        char_ids = char_ids[:T]
-        y_seq = y_seq[:T]
+        y_seq = self.labels_list[idx]
         
         return {
             'embedding': torch.tensor(emb, dtype=torch.float32),      # (T, 768)
             'char_ids': torch.tensor(char_ids, dtype=torch.long),     # (T,)
             'label': torch.tensor(y_seq, dtype=torch.long),           # (T,)
-            'mask': torch.tensor([True] * T, dtype=torch.bool)        # (T,)
+            'mask': torch.tensor([True] * len(emb), dtype=torch.bool) # (T,)
         }
 
 
