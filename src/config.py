@@ -297,7 +297,10 @@ EVALUATION_CONFIG = {
     "metrics": ["der", "wer", "accuracy"],  # Diacritic Error Rate, Word Error Rate, Accuracy
     "der_threshold": 0.1,  # Consider prediction correct if DER < threshold
     "save_predictions": True,
-    "prediction_path": "predictions/"
+    "prediction_path": "predictions/",
+    "validation_frequency": 1,  # Evaluate every N epochs (1 = every epoch, 2 = every 2 epochs, etc.)
+    "validation_sample_size": None,  # Use subset of validation data (None = all, 500 = first 500 samples)
+    "eval_start_epoch": 1  # Start evaluation from this epoch (skip early epochs)
 }
 
 # ======================================================

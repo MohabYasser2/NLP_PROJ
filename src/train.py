@@ -305,10 +305,15 @@ def calculate_der(predictions, targets, mask):
     return errors / total_chars if total_chars > 0 else 0
 
 
-def evaluate_model(model, lines, Y, vocab, embedder, device, diacritic2id, model_name="bilstm_crf", config=None):
+def evaluate_model(model, lines, Y, vocab, embedder, device, diacritic2id, model_name="bilstm_crf", config=None, 
+                   embeddings_cache=None, char_ids_cache=None):
     """
     Evaluate model on validation set using COMPETITION MODE CSV comparison.
     Generates CSV predictions and compares against golden CSV for exact competition accuracy.
+    
+    Args:
+        embeddings_cache: Pre-computed embeddings for fast evaluation (optional)
+        char_ids_cache: Pre-computed char_ids for fast evaluation (optional)
     """
     model.eval()
     
@@ -343,21 +348,25 @@ def evaluate_model(model, lines, Y, vocab, embedder, device, diacritic2id, model
             
             # Prepare input based on model type
             if config.get("use_contextual", False):
-                # Use embedder on ORIGINAL line (embedder strips diacritics internally)
-                emb = embedder.embed_line_chars(line)
-                
-                # For fusion models, we need matching char_ids
-                if is_fusion_model:
+                # Use cached embeddings if available (MUCH faster)
+                if embeddings_cache is not None and char_ids_cache is not None:
+                    if embeddings_cache[line_idx] is None:
+                        continue
+                    emb = embeddings_cache[line_idx]
+                    char_ids = char_ids_cache[line_idx]
+                else:
+                    # Fallback: compute on-the-fly
+                    emb = embedder.embed_line_chars(line)
                     char_ids = vocab.encode(base_chars)
-                    
-                    # Align lengths
                     min_len = min(len(emb), len(char_ids))
                     emb = emb[:min_len]
                     char_ids = char_ids[:min_len]
-                    
+                
+                # For fusion models, we need matching char_ids
+                if is_fusion_model:
                     X_tensor = torch.tensor(emb, dtype=torch.float32).unsqueeze(0).to(device)
                     char_ids_tensor = torch.tensor(char_ids, dtype=torch.long).unsqueeze(0).to(device)
-                    mask = torch.tensor([True] * min_len, dtype=torch.bool).unsqueeze(0).to(device)
+                    mask = torch.tensor([True] * len(emb), dtype=torch.bool).unsqueeze(0).to(device)
                 else:
                     X_tensor = torch.tensor(emb, dtype=torch.float32).unsqueeze(0).to(device)
                     mask = torch.tensor([True] * len(emb), dtype=torch.bool).unsqueeze(0).to(device)
@@ -528,6 +537,30 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
     model = get_model(model_name, config)
     model.to(device)
 
+    # PRE-COMPUTE validation embeddings once for HUGE speedup (if using contextual)
+    val_embeddings_cache = None
+    val_char_ids_cache = None
+    if config.get("use_contextual", False):
+        print("\nPre-computing validation embeddings for fast evaluation...")
+        val_embeddings_cache = []
+        val_char_ids_cache = []
+        for line in tqdm(lines_val, desc="Caching val embeddings"):
+            base_chars, _ = tokenize_line(line)
+            if not base_chars:
+                val_embeddings_cache.append(None)
+                val_char_ids_cache.append(None)
+                continue
+            
+            emb = embedder.embed_line_chars(line)
+            char_ids = vocab.encode(base_chars)
+            
+            # Align lengths
+            min_len = min(len(emb), len(char_ids))
+            val_embeddings_cache.append(emb[:min_len])
+            val_char_ids_cache.append(char_ids[:min_len])
+        
+        print(f"✓ Validation embeddings cached ({len(val_embeddings_cache)} samples)")
+
     # Optimizer and scheduler
     optimizer = torch.optim.Adam(
         model.parameters(),
@@ -548,6 +581,24 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
     best_der = float('inf')
     patience = config["patience"]
     patience_counter = 0
+    
+    # Print speed optimization summary
+    print("\n" + "="*70)
+    print("SPEED OPTIMIZATIONS ENABLED")
+    print("="*70)
+    print(f"✓ Batch size: {config.get('batch_size', 'default')}")
+    if config.get("use_contextual", False):
+        print(f"✓ Pre-computed training embeddings: {len(train_dataset)} samples")
+        print(f"✓ Cached validation embeddings: {len(val_embeddings_cache) if val_embeddings_cache else 0} samples")
+    validation_frequency = EVALUATION_CONFIG.get('validation_frequency', 1)
+    validation_sample_size = EVALUATION_CONFIG.get('validation_sample_size', None)
+    eval_start_epoch = EVALUATION_CONFIG.get('eval_start_epoch', 1)
+    print(f"✓ Validation frequency: Every {validation_frequency} epoch(s)")
+    if validation_sample_size:
+        print(f"✓ Validation subset: {validation_sample_size}/{len(lines_val)} samples ({validation_sample_size/len(lines_val)*100:.1f}%)")
+    print(f"✓ Evaluation starts at epoch: {eval_start_epoch}")
+    print(f"✓ Checkpoint saving: Every epoch + best model")
+    print("="*70 + "\n")
     
     # Check model type for appropriate handling
     is_fusion_model = model_name.lower() == "arabert_char_bilstm_crf"
@@ -623,38 +674,81 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
 
         avg_train_loss = train_loss / train_steps
 
-        # Validation (using competition mode for accurate metrics)
-        val_accuracy, val_der = evaluate_model(
-            model, lines_val, Y_val, vocab, embedder, device, diacritic2id, model_name, config
-        )
+        # Conditional validation for speed (only every N epochs, use subset, skip early epochs)
+        validation_frequency = EVALUATION_CONFIG.get('validation_frequency', 1)
+        validation_sample_size = EVALUATION_CONFIG.get('validation_sample_size', None)
+        eval_start_epoch = EVALUATION_CONFIG.get('eval_start_epoch', 1)
+        
+        should_evaluate = (epoch + 1) >= eval_start_epoch and (epoch + 1) % validation_frequency == 0
+        
+        if should_evaluate:
+            # Use subset of validation data for faster evaluation
+            if validation_sample_size and validation_sample_size < len(lines_val):
+                val_lines_subset = lines_val[:validation_sample_size]
+                val_Y_subset = Y_val[:validation_sample_size]
+                print(f"  Using validation subset: {validation_sample_size}/{len(lines_val)} samples")
+            else:
+                val_lines_subset = lines_val
+                val_Y_subset = Y_val
+            
+            # Validation (using competition mode for accurate metrics)
+            val_accuracy, val_der = evaluate_model(
+                model, val_lines_subset, val_Y_subset, vocab, embedder, device, diacritic2id, model_name, config,
+                embeddings_cache=val_embeddings_cache[:validation_sample_size] if (val_embeddings_cache and validation_sample_size) else val_embeddings_cache,
+                char_ids_cache=val_char_ids_cache[:validation_sample_size] if (val_char_ids_cache and validation_sample_size) else val_char_ids_cache
+            )
 
-        print(f"Epoch {epoch+1}/{config['num_epochs']} | Train Loss: {avg_train_loss:.4f} | Val Accuracy: {val_accuracy:.4f} | DER: {val_der:.4f}")
+            print(f"Epoch {epoch+1}/{config['num_epochs']} | Train Loss: {avg_train_loss:.4f} | Val Accuracy: {val_accuracy:.4f} | DER: {val_der:.4f}")
+            
+            # Early stopping check
+            if val_der < best_der:
+                best_der = val_der
+                patience_counter = 0
+                print(f"  ✓ New best model! DER: {best_der:.4f}")
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    print(f"\n⚠ Early stopping triggered at epoch {epoch+1} (no improvement for {patience} epochs)")
+                    # Save final checkpoint before stopping
+                    checkpoint = {
+                        'epoch': epoch + 1,
+                        'model_state_dict': model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+                        'best_der': best_der,
+                        'config': config,
+                        'vocab': vocab.char2id
+                    }
+                    torch.save(checkpoint, f"models/epoch_{epoch+1}_{model_name}.pth")
+                    break
+        else:
+            print(f"Epoch {epoch+1}/{config['num_epochs']} | Train Loss: {avg_train_loss:.4f} | Validation skipped (every {validation_frequency} epochs)")
+            val_der = best_der  # Keep best DER for comparison
 
         # Learning rate scheduling
         if scheduler:
             scheduler.step()
 
-        # Early stopping
-        if val_der < best_der:
-            best_der = val_der
-            patience_counter = 0
-            # Save complete checkpoint
-            checkpoint = {
-                'epoch': epoch + 1,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
-                'best_der': best_der,
-                'config': config,
-                'vocab': vocab.char2id
-            }
+        # Save checkpoint EVERY epoch (not just best)
+        checkpoint = {
+            'epoch': epoch + 1,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+            'best_der': best_der,
+            'val_der': val_der,
+            'train_loss': avg_train_loss,
+            'config': config,
+            'vocab': vocab.char2id
+        }
+        
+        # Save with epoch number
+        torch.save(checkpoint, f"models/epoch_{epoch+1}_{model_name}.pth")
+        
+        # Also update best model if this is the best so far
+        if should_evaluate and val_der == best_der:
             torch.save(checkpoint, f"models/best_{model_name}.pth")
-            print(f"  ✓ New best model! DER: {best_der:.4f} (saved at epoch {epoch+1})")
-        else:
-            patience_counter += 1
-            if patience_counter >= patience:
-                print(f"\n⚠ Early stopping triggered at epoch {epoch+1} (no improvement for {patience} epochs)")
-                break
+            print(f"  💾 Best model updated: models/best_{model_name}.pth")
 
     print("\n" + "="*70)
     print("✓ TRAINING COMPLETED!")
