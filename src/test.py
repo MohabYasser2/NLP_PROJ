@@ -51,7 +51,8 @@ class ContextualDataset(Dataset):
         self.embedder = embedder
 
         # Pre-encode labels to avoid redundant computation
-        self.Y_encoded = encode_corpus(Y, diacritic2id)
+        # Use skip_unknown=True for testing to ignore unknown diacritics
+        self.Y_encoded = encode_corpus(Y, diacritic2id, skip_unknown=True)
 
     def __len__(self):
         return len(self.lines)

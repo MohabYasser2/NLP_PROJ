@@ -133,7 +133,9 @@ ARABERT_CHAR_BILSTM_CRF_CONFIG = {
     "gradient_clip": 5.0,
     "use_crf": True,
     "use_contextual": True,  # Uses AraBERT embeddings
-    "batch_size": 1  # Memory constraint with contextual embeddings
+    "batch_size": 4,  # 4x faster training with proper collation
+    "gradient_accumulation_steps": 3,  # Effective batch size: 12
+    "mixed_precision": True  # AMP for additional speedup
 }
 
 # ======================================================
@@ -154,6 +156,31 @@ CHAR_BILSTM_CLASSIFIER_CONFIG = {
     "gradient_clip": 5.0,
     "batch_size": 32,
     "use_contextual": False
+}
+
+# ======================================================
+# Superior AraBERT + Character BiLSTM-CRF Configuration (SOTA with Attention)
+# ======================================================
+
+SUPERIOR_ARABERT_CHAR_BILSTM_CRF_CONFIG = {
+    "char_vocab_size": None,  # Will be set dynamically
+    "tagset_size": NUM_DIACRITIC_CLASSES,
+    "arabert_dim": 768,
+    "char_embedding_dim": 128,
+    "hidden_dim": 512,
+    "num_layers": 3,
+    "num_heads": 8,  # Multi-head attention
+    "dropout": 0.2,
+    "learning_rate": 0.001,
+    "weight_decay": 1e-5,
+    "num_epochs": 50,
+    "patience": 10,
+    "gradient_clip": 5.0,
+    "use_crf": True,
+    "use_contextual": True,
+    "batch_size": 4,  # 4x faster training
+    "gradient_accumulation_steps": 3,  # Effective batch size: 12
+    "mixed_precision": True  # AMP for 2-3x speedup
 }
 
 # ======================================================
@@ -287,6 +314,7 @@ def get_model_config(model_name: str):
         "hierarchical_bilstm": HIERARCHICAL_BILSTM_CONFIG,
         "arabert_bilstm_crf": ARABERT_BILSTM_CRF_CONFIG,
         "arabert_char_bilstm_crf": ARABERT_CHAR_BILSTM_CRF_CONFIG,
+        "superior_arabert_char_bilstm_crf": SUPERIOR_ARABERT_CHAR_BILSTM_CRF_CONFIG,
         "char_bilstm_classifier": CHAR_BILSTM_CLASSIFIER_CONFIG,
         "charngram_bilstm_classifier": CHARNGRAM_BILSTM_CLASSIFIER_CONFIG
     }

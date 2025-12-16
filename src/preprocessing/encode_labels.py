@@ -40,7 +40,8 @@ def canonicalize_diacritics(diac: str) -> str:
 
 def encode_labels(
     labels: List[str],
-    diacritic2id: Dict[str, int]
+    diacritic2id: Dict[str, int],
+    skip_unknown: bool = False
 ) -> List[int]:
     """
     Encode a list of diacritic strings into integer IDs.
@@ -48,6 +49,7 @@ def encode_labels(
     Args:
         labels: list of diacritic strings (one per base letter)
         diacritic2id: mapping from diacritic string to ID
+        skip_unknown: if True, map unknown diacritics to empty class (0) instead of raising error
 
     Returns:
         List of integer label IDs
@@ -58,13 +60,17 @@ def encode_labels(
         d_norm = canonicalize_diacritics(d)
 
         if d_norm not in diacritic2id:
-            print(f"Unknown diacritic combination: {repr(d_norm)}")
-            print(f"Available diacritics: {list(diacritic2id.keys())}")
-            raise ValueError(
-                f"Unknown diacritic combination: {repr(d_norm)}"
-            )
-
-        encoded.append(diacritic2id[d_norm])
+            if skip_unknown:
+                # Map unknown diacritics to empty class during testing
+                encoded.append(0)  # 0 = no diacritic
+            else:
+                print(f"Unknown diacritic combination: {repr(d_norm)}")
+                print(f"Available diacritics: {list(diacritic2id.keys())}")
+                raise ValueError(
+                    f"Unknown diacritic combination: {repr(d_norm)}"
+                )
+        else:
+            encoded.append(diacritic2id[d_norm])
 
     return encoded
 
@@ -75,13 +81,15 @@ def encode_labels(
 
 def encode_corpus(
     all_labels: List[List[str]],
-    diacritic2id: Dict[str, int]
+    diacritic2id: Dict[str, int],
+    skip_unknown: bool = False
 ) -> List[List[int]]:
     """
     Encode labels for the entire corpus.
 
     Args:
         all_labels: list of label sequences (per line)
+        skip_unknown: if True, map unknown diacritics to empty class instead of raising error
 
     Returns:
         List of encoded label sequences
@@ -89,7 +97,7 @@ def encode_corpus(
     all_encoded = []
 
     for labels in all_labels:
-        encoded = encode_labels(labels, diacritic2id)
+        encoded = encode_labels(labels, diacritic2id, skip_unknown=skip_unknown)
         all_encoded.append(encoded)
 
     return all_encoded

@@ -59,9 +59,9 @@ class ContextualDataset(Dataset):
         # 1) Compute AraBERT embedding on-the-fly (per-character)
         emb = self.embedder.embed_line_chars(line)  # (T, 768)
         
-        # 2) Encode character IDs (for morphology fusion)
-        chars = list(line)
-        char_ids = self.vocab.encode(chars)  # (T,)
+        # 2) Extract base characters using tokenize_line (consistent with test.py)
+        base_chars, _ = tokenize_line(line)
+        char_ids = self.vocab.encode(base_chars)  # (T,)
         
         # Align lengths safely
         T = min(len(emb), len(char_ids), len(y_seq))
@@ -126,7 +126,7 @@ def collate_contextual_batch(batch):
     )
 
 # Import our modules
-from src.preprocessing.tokenize import tokenize_file
+from src.preprocessing.tokenize import tokenize_file, tokenize_line
 from src.preprocessing.encode_labels import encode_corpus
 from utils.vocab import CharVocab
 from src.config import (
