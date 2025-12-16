@@ -1,236 +1,138 @@
-# Arabic Diacritization System - AI Coding Agent Guide
+# Arabic Diacritization Project - AI Assistant Guide
 
 ## Project Overview
+This is an **Arabic text diacritization** system using deep learning. The task is sequence labeling: predict which diacritic marks (ً ٌ ٍ َ ُ ِ ْ ّ) should be added to each Arabic base character. The system uses **15 diacritic classes** including combinations like "ّ َ" (shadda+fatha) and "" (no diacritic).
 
-Arabic diacritization system using BiLSTM-CRF and contextual embeddings (AraBERT). Predicts 15 diacritic classes for each character in Arabic text sequences.
+**Key concept**: The model predicts one diacritic label per base character, NOT per Unicode character. Preprocessing tokenizes text into (base_chars, diacritics) aligned sequences.
 
-## Core Architecture
+## Architecture & Data Flow
 
-### Data Flow Pattern
+### Core Pipeline
+1. **Tokenization** ([src/preprocessing/tokenize.py](src/preprocessing/tokenize.py)): Splits Arabic text into base characters (letters/digits) and their diacritics
+2. **Encoding** ([src/preprocessing/encode_labels.py](src/preprocessing/encode_labels.py)): Maps diacritic strings to IDs using `utils/diacritic2id.pickle` (single source of truth)
+3. **Feature extraction** ([src/features/](src/features/)): 
+   - Character embeddings (100-dim trainable)
+   - AraBERT contextual embeddings (768-dim, `aubmindlab/bert-base-arabertv02`)
+   - N-gram features (bigrams)
+4. **Models** ([src/models/](src/models/)): BiLSTM-CRF variants with/without contextual embeddings
+5. **Inference**: Decode CRF predictions back to diacritized text
 
-```
-Raw Text → tokenize.py → Character-Diacritic Pairs → encode_labels.py → Integer IDs (0-14) → Model → Predictions
-```
+### Model Variants (Best → Simple)
+- **`arabert_char_bilstm_crf`**: SOTA - Dual fusion (AraBERT 768-dim + Character 100-dim) → 2-layer BiLSTM → CRF
+- **`arabert_bilstm_crf`**: AraBERT only → BiLSTM → CRF
+- **`char_bilstm_classifier`**: Character embeddings → BiLSTM → Softmax (no CRF)
+- **`charngram_bilstm_classifier`**: Character + Bigram → BiLSTM → Softmax
+- **`bilstm_crf`**: Simple character-only BiLSTM-CRF baseline
 
-**Critical alignment**: Characters and diacritic labels maintain strict 1-to-1 correspondence. Spaces are skipped during tokenization but word boundaries are implicit.
+All models output **15 classes** per character (NUM_DIACRITIC_CLASSES in [src/config.py](src/config.py)).
 
-### Dual Embedding Modes
+## Critical Patterns & Conventions
 
-The system supports two distinct embedding strategies controlled by `use_contextual` flag:
-
-1. **Character Embeddings** (`use_contextual=False`):
-
-   - Simple learned embeddings (100-dim)
-   - Fast training on CPU
-   - vocab.py builds char2id mapping with `<PAD>=0`, `<UNK>=1`
-   - Uses `TensorDataset` with pre-encoded sequences
-
-2. **Contextual Embeddings** (`use_contextual=True`):
-   - AraBERT generates 768-dim per-character embeddings
-   - Requires GPU, uses custom `ContextualDataset` class
-   - Embeddings computed on-the-fly in `__getitem__` via `embedder.embed_line_chars()`
-   - Must use `collate_contextual_batch` for dynamic padding
-
-**Key Convention**: When switching modes, update BOTH `embedding_dim` (100→768) AND `use_contextual` (False→True) in config.py
-
-## Critical Configuration (src/config.py)
-
-All models use centralized config dictionaries. Example pattern:
+### 1. Model Input Handling (Forward Pass Signatures)
+Models have **different input requirements**. Always check model type before feeding data:
 
 ```python
-BILSTM_CRF_CONFIG = {
-    "embedding_dim": 100,        # 768 for AraBERT
-    "hidden_dim": 256,           # BiLSTM effective (128 per direction)
-    "tagset_size": 15,           # Fixed diacritic classes
-    "use_contextual": False,     # True for AraBERT
-    "batch_size": 32,            # 1 for contextual (memory)
-    "num_epochs": 50,
-    "patience": 7,               # Early stopping
-}
+# CRF models (bilstm_crf, arabert_bilstm_crf)
+loss = model(X_batch, tags=y_batch, mask=mask_batch)  # Training
+predictions = model(X_batch, mask=mask_batch)          # Inference
+
+# Fusion model (arabert_char_bilstm_crf) - DUAL INPUTS
+loss = model(arabert_emb, char_ids, tags=y_batch, mask=mask_batch)
+predictions = model(arabert_emb, char_ids, mask=mask_batch)
+
+# Classifier models (char_bilstm_classifier, charngram_bilstm_classifier)
+logits, loss = model(X_batch, tags=y_batch, mask=mask_batch)  # Training
+logits, preds = model(X_batch, mask=mask_batch)               # Inference
 ```
 
-**Convention**: Config changes require retraining. Never modify configs mid-training.
+**Train/test scripts** ([src/train.py](src/train.py), [src/test.py](src/test.py)) use flags to detect model type:
+```python
+is_fusion_model = model_name.lower() == "arabert_char_bilstm_crf"
+is_simple_classifier = model_name.lower() == "char_bilstm_classifier"
+```
 
-## Model Implementations
+### 2. Dataset Creation (Contextual vs Non-Contextual)
+- **Non-contextual** (character embeddings): Use `TensorDataset` with pre-encoded sequences
+- **Contextual** (AraBERT): Use `ContextualDataset` that computes embeddings on-the-fly to save memory
+  - Batch size must be **1** for contextual models (see DATA_CONFIG in config.py)
+  - Use `collate_contextual_batch` collate function for padding
 
-### BiLSTM-CRF (Baseline Model)
-
-- **File**: [src/models/bilstm_crf.py](src/models/bilstm_crf.py)
-- **CRF Library**: TorchCRF (requires tensor transposition: batch_first → seq_first)
-- **Forward behavior**: Returns loss (training) or predictions list (inference) based on `tags` parameter
-- **Transposition pattern** (critical for CRF):
+### 3. Configuration System ([src/config.py](src/config.py))
+- Each model has a dedicated config dict (e.g., `ARABERT_CHAR_BILSTM_CRF_CONFIG`)
+- **Vocab size is set dynamically** - don't hardcode it:
   ```python
-  emissions_transposed = emissions.transpose(0, 1)  # (batch, seq, tags) → (seq, batch, tags)
-  tags_transposed = tags.transpose(0, 1)
-  loss = -self.crf(emissions_transposed, tags_transposed, mask=mask).sum()
+  config = get_model_config(model_name)
+  config = update_vocab_size(config.copy(), len(vocab.char2id))
   ```
+- Key flag: `use_contextual` determines if AraBERT embeddings are used
 
-### AraBERT + Character Fusion BiLSTM-CRF (SOTA Model)
+### 4. Evaluation Metrics
+- **DER (Diacritic Error Rate)**: Primary metric - % of characters with wrong diacritics
+- **Accuracy**: Character-level accuracy (excludes padding and empty diacritics "")
+- Both metrics **exclude padding tokens** using the mask tensor
 
-- **File**: [src/models/arabert_char_bilstm_crf.py](src/models/arabert_char_bilstm_crf.py)
-- **Dual Feature Architecture**: Combines AraBERT contextual embeddings (semantic) with character embeddings (morphological)
-- **Forward signature**: `forward(arabert_emb, char_ids, tags=None, mask=None)`
-- **Key components**:
-  - AraBERT projection (768→384) with LayerNorm + Dropout
-  - Character embedding layer (100-dim)
-  - Feature concatenation (484-dim total)
-  - 2-layer BiLSTM (deeper than baseline)
-  - CRF decoding
-- **Training**: Requires dual inputs unpacked from 4-tuple batches: `(embedding, char_ids, labels, mask)`
+### 5. Data Files
+- Training data: [data/train.txt](data/train.txt), [data/val.txt](data/val.txt) - already tokenized/normalized
+- Test data: CSV format with `id,text` (no diacritics) → predict → CSV with `id,text_diacritized`
+- Raw corpus: [texts.txt/](texts.txt/) contains classical Arabic books for data augmentation
 
-### Hierarchical BiLSTM
+## Development Workflows
 
-- **File**: [src/models/hierarchical_bilstm.py](src/models/hierarchical_bilstm.py)
-- Uses character BiLSTM + 1D convolution (kernel_size=3) for word features
-- No CRF layer, uses standard cross-entropy loss
+### Training a Model
+```powershell
+python -m src.train --model arabert_char_bilstm_crf --train data/train.txt --val data/val.txt
+```
+- Models auto-save to `models/best_{model_name}.pth` when validation DER improves
+- Checkpoints include: model weights, optimizer state, config, vocabulary
 
-## Training & Testing Workflow
-
-### Standard Training Commands
-
-```bash
-# CPU with character embeddings (4-8 hours) - BASELINE
-python src/train.py --model bilstm_crf --train_data data/train.txt --val_data data/val.txt
-
-# GPU with AraBERT - BASELINE (97.99% accuracy)
-python src/train.py --model bilstm_crf --train_data data/train.txt --val_data data/val.txt
-
-# GPU with AraBERT + Character Fusion - SOTA (expected 98.2-98.5%)
-python src/train.py --model arabert_char_bilstm_crf --train_data data/train.txt --val_data data/val.txt
+### Testing/Inference
+```powershell
+python -m src.test --model arabert_char_bilstm_crf --checkpoint models/best_arabert_char_bilstm_crf.pth --test data/test.csv --output predictions.csv
 ```
 
-### Testing
-
-```bash
-# Test baseline model
-python src/test.py --model bilstm_crf --model_path models/best_bilstm_crf.pth --test_data data/test.txt
-
-# Test SOTA fusion model
-python src/test.py --model arabert_char_bilstm_crf --model_path models/best_arabert_char_bilstm_crf.pth --test_data data/test.txt
+### Data Normalization
+```powershell
+python normalize_dataset.py  # Normalizes data to 15-diacritic system
 ```
+Filters invalid diacritics and ensures consistency with `utils/diacritic2id.pickle`.
 
-**Convention**: Always specify `--model` matching the architecture used during training.
+### Adding a New Model
+1. Create model class in [src/models/](src/models/) inheriting `nn.Module`
+2. Add config dict to [src/config.py](src/config.py) and update `get_model_config()`
+3. Add model initialization branch in `get_model()` function ([src/train.py](src/train.py) lines 200-250)
+4. Add evaluation branch in `evaluate_model()` if input signature differs
 
-## Preprocessing Pipeline
+## Gotchas & Important Notes
 
-### Tokenization (src/preprocessing/tokenize.py)
+1. **Diacritic Mapping**: ALWAYS load from `utils/diacritic2id.pickle` - never hardcode diacritic IDs
+2. **Vocab Leakage**: Build vocabulary ONLY from training data (see [src/train.py](src/train.py) line 430)
+3. **Batch Size**: Set to 1 for contextual models, 32 for non-contextual (memory constraints)
+4. **Sequence Alignment**: Tokenization produces (base_chars, diacritics) where len(base_chars) == len(diacritics)
+5. **CRF Models**: Return lists of predictions (not tensors) - handle accordingly in evaluation
+6. **AraBERT Cache**: Disabled on Kaggle (`cache_dir=None`) to avoid disk space issues
+7. **Gradient Clipping**: All models use gradient clipping (config["gradient_clip"]) to prevent exploding gradients
+8. **Early Stopping**: Patience counter resets when DER improves (not accuracy)
 
-- **Input**: Diacritized Arabic text
-- **Output**: Parallel lists (X: base chars, Y: diacritic strings)
-- **Diacritic Canonicalization**: Shadda (ّ) always comes first, then other diacritics
-- **Unicode Normalization**: NFKC → NFC to handle compatibility forms
-
-### Label Encoding (src/preprocessing/encode_labels.py)
-
-- Uses `utils/diacritic2id.pickle` for mapping
-- Empty string (`''`) = 0 (no diacritic)
-- Returns list of integer sequences matching character positions
-
-### Padding (src/preprocessing/pad_sequences.py)
-
-- Default `max_seq_length=256` (configurable)
-- Padding value: 0 (matches `<PAD>` and empty diacritic)
-- Truncation: Keeps leftmost characters
-
-## Contextual Embeddings (src/features/contextual_embeddings.py)
-
-### ContextualEmbedder Class
-
-- **Model**: `aubmindlab/bert-base-arabertv02`
-- **Key Method**: `embed_line_chars(line)` returns (T, 768) per-character embeddings
-- **Input Preprocessing**: Strips diacritics before feeding to BERT
-- **Caching**: Disabled by default (`cache_dir=None`) to save disk space
-- **Alignment**: Word-level BERT embeddings expanded to characters within each word
-
-**Important**: Contextual embeddings require matching `char_ids` for morphology fusion in some models. See ContextualDataset implementation for dual-output pattern.
-
-## Data Files & Vocabulary
-
-### Vocabulary Building
-
-- **Character Vocab**: [utils/vocab.py](utils/vocab.py) - CharVocab class builds incrementally
-- **Diacritic Mapping**: `utils/diacritic2id.pickle` - Fixed 15-class mapping
-- **Word Vocab**: [utils/word_vocab.py](utils/word_vocab.py) - For hierarchical models
-
-### Data Structure
-
+## File Hierarchy Quick Reference
 ```
+src/
+  config.py              # All hyperparameters (single source of truth)
+  train.py               # Training script with model-specific branching
+  test.py                # Inference script for CSV predictions
+  models/                # Model architectures (inheritance: nn.Module)
+  preprocessing/         # Tokenization & encoding (1-to-1 char alignment)
+  features/              # Feature extractors (AraBERT, n-grams)
+utils/
+  vocab.py               # CharVocab class (char2id, id2char)
+  diacritic2id.pickle    # 15-class label mapping (IMMUTABLE)
 data/
-  train.txt          # 50,001 lines diacritized Arabic
-  val.txt            # Validation split
-  processed/
-    contextual_cache/ # AraBERT embedding cache (optional)
-models/
-  best_bilstm_crf.pth              # Character embeddings model
-  best_hierarchical_bilstm.pth     # Hierarchical model
+  train.txt, val.txt     # Tokenized training data (1 line = 1 sample)
+models/                  # Saved checkpoints (.pth files)
 ```
 
-## Custom Dataset Pattern (Contextual Mode)
-
-```python
-class ContextualDataset(Dataset):
-    def __getitem__(self, idx):
-        line = self.lines[idx]
-        emb = self.embedder.embed_line_chars(line)  # (T, 768)
-        char_ids = self.vocab.encode(chars)         # (T,) for morphology
-        return {
-            "embedding": torch.tensor(emb),
-            "char_ids": torch.tensor(char_ids),
-            "label": torch.tensor(y_seq),
-            "mask": torch.ones(T, dtype=torch.bool)
-        }
-
-def collate_contextual_batch(batch):
-    # Pad embeddings, char_ids, labels, masks to max_len in batch
-    # Uses torch.nn.functional.pad with appropriate dimensions
-```
-
-**Convention**: Always use `batch_size=1` for contextual mode due to memory constraints.
-
-## Evaluation Metrics
-
-### DER (Diacritic Error Rate)
-
-- Primary metric: `errors / total_characters` (excluding padding)
-- Expected range: 5-15% (lower is better)
-- Calculated per character, not per word
-
-### Accuracy
-
-- `correct_predictions / total_characters` = (1 - DER)
-- Expected range: 85-95%
-
-**Convention**: Spaces are excluded from all metrics. Only count actual base characters.
-
-## Common Pitfalls
-
-1. **CRF Tensor Shape Mismatch**: Always transpose from batch_first to seq_first before CRF forward
-2. **Config Sync Issues**: Changing `use_contextual` requires updating `embedding_dim` (100↔768) and `batch_size` (32↔1)
-3. **Vocabulary Mismatches**: Character vocab must be built from SAME data split used for training
-4. **Padding Semantics**: Padding value 0 represents both `<PAD>` token and empty diacritic class
-5. **Memory Issues with AraBERT**: Use `batch_size=1` and disable caching if running out of memory
-
-## Dependencies
-
-See [requirements.txt](requirements.txt) for versions:
-
-- torch>=2.0.0
-- transformers>=4.30.0 (for AraBERT)
-- TorchCRF>=1.1.0 (note: requires tensor transposition)
-- numpy, scikit-learn, tqdm
-
-## Project-Specific Conventions
-
-- **Seed**: All scripts use `seed=42` for reproducibility via `set_seed()` function
-- **Gradient Clipping**: `max_norm=5.0` for all models
-- **Optimizer**: Adam with `weight_decay=1e-5`
-- **LR Scheduling**: StepLR (step_size=10, gamma=0.5)
-- **Early Stopping**: Monitors validation DER with configurable patience (default: 7 epochs)
-- **Model Checkpointing**: Saves complete state including optimizer/scheduler for resumption
-
-## Key Architecture Documents
-
-- [SYSTEM_ARCHITECTURE.md](SYSTEM_ARCHITECTURE.md) - Detailed data flow diagrams
-- [HIERARCHICAL_MODEL_ARCHITECTURE.md](HIERARCHICAL_MODEL_ARCHITECTURE.md) - Component specifications
-- [VERIFIED_FLOW_SUMMARY.md](VERIFIED_FLOW_SUMMARY.md) - Training commands and configurations
-- [ARABERT_CHAR_FUSION_IMPLEMENTATION.md](ARABERT_CHAR_FUSION_IMPLEMENTATION.md) - SOTA fusion model implementation guide
+## When Working With This Codebase
+- **Read model forward signatures** before modifying train/test loops
+- **Check config.py first** when adjusting hyperparameters
+- **Use grep_search** to find how existing models handle specific inputs
+- **Test with small max_samples** (e.g., 100) before full training runs
+- **Preserve mask handling** in all sequence operations (critical for CRF)

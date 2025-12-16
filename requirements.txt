@@ -1,0 +1,29 @@
+# Arabic Diacritization Project - Requirements
+# Python 3.8+
+
+# Deep Learning Framework
+torch>=2.0.0
+torchvision>=0.15.0
+torchaudio>=2.0.0
+
+# Transformers & NLP
+transformers>=4.30.0
+tokenizers>=0.13.0
+sentencepiece>=0.1.99
+
+# CRF Layer
+TorchCRF>=1.0.7
+
+# Data Processing
+numpy>=1.24.0
+pandas>=2.0.0
+scikit-learn>=1.3.0
+
+# Progress & Visualization
+tqdm>=4.65.0
+
+# Arabic Text Processing
+pyarabic>=0.6.15
+
+# Utilities
+requests>=2.31.0
