@@ -126,6 +126,7 @@ python -m src.test --model char_bilstm_classifier --model_path "models/best_char
 ```
 
 **Competition mode specifics:**
+
 - Input: Plain text file with undiacritized Arabic (one line per sample)
 - Output: CSV with sequential character IDs and predicted diacritic labels
 - Uses same tokenization as training (`tokenize_line()`) to ensure consistency
@@ -151,12 +152,14 @@ Filters invalid diacritics and ensures consistency with `utils/diacritic2id.pick
 ### Common Issues
 
 **AraBERT Model Fails in Competition Mode**
+
 - **Symptom**: Model has 99%+ validation DER but terrible competition predictions
 - **Root Cause**: `use_contextual` flag not set in checkpoint config → embedder not initialized → wrong input type
 - **Fix**: Verify checkpoint contains correct config flags, or override in test.py based on model name
 - **Reference**: See [MODEL_PERFORMANCE_ANALYSIS.md](MODEL_PERFORMANCE_ANALYSIS.md) for complete diagnosis
 
 **Input Shape Mismatches**
+
 - **Symptom**: RuntimeError about tensor shapes during forward pass
 - **Diagnosis**: Use model introspection to detect model type:
   ```python
@@ -166,11 +169,13 @@ Filters invalid diacritics and ensures consistency with `utils/diacritic2id.pick
 - **Fix**: Match input format to model architecture (see "Model Input Handling" section)
 
 **Memory Issues During Training**
+
 - **Symptom**: CUDA OOM or system memory exhausted
 - **Fix**: Reduce batch size to 1 for contextual models, disable AraBERT cache (`cache_dir=None`)
 - **Alternative**: Use gradient accumulation or mixed precision training
 
 **CRF Prediction Format**
+
 - **Symptom**: Predictions are nested lists `[[1], [2], [3]]` instead of flat `[1, 2, 3]`
 - **Fix**: Check CRF return format and flatten if needed (see [src/test.py](src/test.py) line 680-695)
 
