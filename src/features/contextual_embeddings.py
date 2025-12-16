@@ -189,7 +189,7 @@ class ContextualEmbedder:
             
             # Run batch through model on GPU
             with torch.no_grad():
-                out = self.model(**encodings)
+                out = self.model(**encodings, output_hidden_states=True)
             
             # Extract embeddings for each line in batch
             for batch_idx, line in enumerate(chunk_proc):
