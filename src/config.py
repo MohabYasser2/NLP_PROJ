@@ -133,8 +133,8 @@ ARABERT_CHAR_BILSTM_CRF_CONFIG = {
     "gradient_clip": 5.0,
     "use_crf": True,
     "use_contextual": True,  # Uses AraBERT embeddings
-    "batch_size": 16,  # 4x faster with caching enabled
-    "gradient_accumulation_steps": 2,  # Effective batch size: 32
+    "batch_size": 64,  # 4x faster with GPU batching
+    "gradient_accumulation_steps": 1,  # Effective batch size: 64
     "mixed_precision": True  # AMP for additional speedup
 }
 

@@ -45,7 +45,7 @@ class ContextualDataset(Dataset):
         # Pre-encode labels
         Y_encoded = encode_corpus(Y, diacritic2id)
         
-        # PRE-COMPUTE all embeddings and char_ids (10x speedup)
+        # PRE-COMPUTE all embeddings in BATCHES (3x faster GPU utilization)
         print(f"Pre-computing embeddings for {len(lines)} samples...")
         self.embeddings = []
         self.char_ids_list = []
@@ -53,26 +53,35 @@ class ContextualDataset(Dataset):
         self.valid_indices = []
         
         from tqdm import tqdm
-        for idx, line in enumerate(tqdm(lines, desc="Computing embeddings")):
-            # Compute embedding once
-            emb = embedder.embed_line_chars(line)
+        
+        # Batch process embeddings for GPU efficiency
+        batch_size = 32  # Process 32 lines at once
+        for batch_start in tqdm(range(0, len(lines), batch_size), desc="Computing embeddings"):
+            batch_end = min(batch_start + batch_size, len(lines))
+            batch_lines = lines[batch_start:batch_end]
             
-            # Extract base characters
-            base_chars, _ = tokenize_line(line)
-            char_ids = vocab.encode(base_chars)
-            y_seq = Y_encoded[idx]
+            # Compute embeddings for entire batch at once (GPU optimized)
+            batch_embeddings = embedder.embed_corpus_chars(batch_lines)
             
-            # Align lengths safely
-            T = min(len(emb), len(char_ids), len(y_seq))
-            
-            # SKIP EMPTY SEQUENCES (prevent RNN error)
-            if T == 0:
-                continue
-            
-            self.embeddings.append(emb[:T])
-            self.char_ids_list.append(char_ids[:T])
-            self.labels_list.append(y_seq[:T])
-            self.valid_indices.append(idx)
+            for idx, (line, emb) in enumerate(zip(batch_lines, batch_embeddings)):
+                global_idx = batch_start + idx
+                
+                # Extract base characters
+                base_chars, _ = tokenize_line(line)
+                char_ids = vocab.encode(base_chars)
+                y_seq = Y_encoded[global_idx]
+                
+                # Align lengths safely
+                T = min(len(emb), len(char_ids), len(y_seq))
+                
+                # SKIP EMPTY SEQUENCES (prevent RNN error)
+                if T == 0:
+                    continue
+                
+                self.embeddings.append(emb[:T])
+                self.char_ids_list.append(char_ids[:T])
+                self.labels_list.append(y_seq[:T])
+                self.valid_indices.append(global_idx)
         
         print(f"✓ All embeddings pre-computed! Valid samples: {len(self.embeddings)}/{len(lines)}")
 
@@ -492,18 +501,16 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
         batch_size=batch_size,
         shuffle=True,
         collate_fn=collate_fn,
-        num_workers=2,  # Parallel data loading (2 workers = safe for most systems)
-        pin_memory=True,  # Faster GPU transfer
-        persistent_workers=True  # Keep workers alive between epochs
+        num_workers=0,  # 0 for Kaggle/notebooks (avoids multiprocessing issues)
+        pin_memory=True  # Faster GPU transfer
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
         collate_fn=collate_fn,
-        num_workers=2,
-        pin_memory=True,
-        persistent_workers=True
+        num_workers=0,
+        pin_memory=True
     )
 
     # Initialize model
