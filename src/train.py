@@ -82,13 +82,6 @@ def collate_contextual_batch(batch):
     Collate function to pad embeddings, char_ids, labels, and masks in a batch.
     Supports dual-input models (AraBERT + char morphology).
     """
-    # Filter out empty sequences before processing
-    batch = [item for item in batch if len(item['embedding']) > 0]
-    
-    if len(batch) == 0:
-        # Return dummy batch (will be skipped in training loop)
-        return None
-    
     embeddings = [item['embedding'] for item in batch]
     char_ids = [item['char_ids'] for item in batch]
     labels = [item['label'] for item in batch]
@@ -308,10 +301,6 @@ def evaluate_model(model, dataloader, device, diacritic2id, model_name="bilstm_c
 
     with torch.no_grad():
         for batch in dataloader:
-            # Skip empty batches (filtered in collate function)
-            if batch is None:
-                continue
-            
             if is_fusion_model:
                 # Fusion model: unpack 4 tensors (embedding, char_ids, labels, mask)
                 X_batch, char_ids_batch, y_batch, mask_batch = batch
@@ -533,10 +522,6 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
 
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config['num_epochs']}")
         for batch in progress_bar:
-            # Skip empty batches (filtered in collate function)
-            if batch is None:
-                continue
-            
             if is_fusion_model:
                 # Fusion model: unpack 4 tensors (embedding, char_ids, labels, mask)
                 X_batch, char_ids_batch, y_batch, mask_batch = batch

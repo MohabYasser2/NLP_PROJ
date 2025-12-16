@@ -27,37 +27,10 @@ def load_diacritic_map(path: str) -> Dict[str, int]:
 def canonicalize_diacritics(diac: str) -> str:
     """
     Normalize diacritic string to canonical Unicode form.
-    Handles data errors like duplicate diacritics.
     """
     if not diac:
         return ""
-    
-    # Remove duplicate consecutive identical diacritics (data errors)
-    # E.g., 'ِِ' -> 'ِ', 'ََ' -> 'َ'
-    cleaned = []
-    prev = None
-    for char in diac:
-        if char != prev:
-            cleaned.append(char)
-        prev = char
-    diac = ''.join(cleaned)
-    
-    # Canonicalize shadda combinations (shadda should come first)
-    shadda = 'ّ'
-    sukun = 'ْ'
-    
-    if shadda in diac and sukun in diac:
-        # Invalid: shadda+sukun combination -> keep only shadda with base vowel if present
-        # E.g., 'َّْ' -> 'َّ'
-        diac = diac.replace(sukun, '')
-    
-    # Ensure shadda comes first if present
-    if shadda in diac and len(diac) > 1:
-        other_chars = diac.replace(shadda, '')
-        if other_chars:
-            # Put shadda first: 'َّ' not 'َّ'
-            diac = shadda + other_chars
-    
+
     return diac
 
 
