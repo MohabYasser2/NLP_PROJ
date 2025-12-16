@@ -42,26 +42,16 @@ class ContextualDataset(Dataset):
     Returns both AraBERT embeddings AND character IDs for fusion models.
     """
     def __init__(self, X, Y, lines, vocab, config, diacritic2id, embedder):
-        # Filter out empty or very short lines
-        valid_indices = []
-        for i, line in enumerate(lines):
-            if line and len(line.strip()) > 0 and len(X[i]) > 0:
-                valid_indices.append(i)
-        
-        # Keep only valid samples
-        self.X = [X[i] for i in valid_indices]
-        self.Y = [Y[i] for i in valid_indices]
-        self.lines = [lines[i] for i in valid_indices]
+        self.X = X
+        self.Y = Y
+        self.lines = lines
         self.vocab = vocab
         self.config = config
         self.diacritic2id = diacritic2id
         self.embedder = embedder
-        
-        if len(valid_indices) < len(lines):
-            print(f"  ✓ Filtered dataset: {len(self.lines)}/{len(lines)} valid sequences")
-        
+
         # Pre-encode labels to avoid redundant computation
-        self.Y_encoded = encode_corpus(self.Y, diacritic2id)
+        self.Y_encoded = encode_corpus(Y, diacritic2id)
 
     def __len__(self):
         return len(self.lines)
@@ -74,23 +64,17 @@ class ContextualDataset(Dataset):
         emb = self.embedder.embed_line_chars(line)  # (T, 768)
         
         # 2) Encode character IDs (for morphology fusion)
-        chars = list(line)
-        char_ids = self.vocab.encode(chars)  # (T,)
+        # CRITICAL: Extract base characters only (no diacritics) to match embedding length
+        # The embedder returns embeddings for base chars, so char_ids must also be base chars
+        from src.preprocessing.tokenize import tokenize_line
+        base_chars, _ = tokenize_line(line)
+        char_ids = self.vocab.encode(base_chars)  # (T,)
         
         # Align lengths safely
         T = min(len(emb), len(char_ids), len(y_seq))
-        
-        # Ensure T > 0 to avoid empty sequences
-        if T == 0:
-            # Fallback: create minimal valid sequence
-            T = 1
-            emb = np.zeros((1, 768))
-            char_ids = [0]
-            y_seq = [0]
-        else:
-            emb = emb[:T]
-            char_ids = char_ids[:T]
-            y_seq = y_seq[:T]
+        emb = emb[:T]
+        char_ids = char_ids[:T]
+        y_seq = y_seq[:T]
 
         return {
             'embedding': torch.tensor(emb, dtype=torch.float32),      # (T, 768)
@@ -306,18 +290,6 @@ def get_model(model_name, config):
             "dropout": config["dropout"]
         }
         model = AraBERTCharBiLSTMCRF(**model_config)
-    elif model_name.lower() == "enhanced_char_bilstm":
-        # Enhanced Character BiLSTM with attention (Improved)
-        model_config = {
-            "vocab_size": config["vocab_size"],
-            "tagset_size": config["tagset_size"],
-            "embedding_dim": config["embedding_dim"],
-            "hidden_dim": config["hidden_dim"],
-            "num_layers": config["num_layers"],
-            "num_heads": config["num_heads"],
-            "dropout": config["dropout"]
-        }
-        model = EnhancedCharBiLSTMClassifier(**model_config)
     elif model_name.lower() == "char_bilstm_classifier":
         # Character-only BiLSTM Classifier (Simple)
         model_config = {
@@ -484,13 +456,12 @@ from src.models.arabert_bilstm_crf import AraBERTBiLSTMCRF
 from src.models.arabert_char_bilstm_crf import AraBERTCharBiLSTMCRF
 from src.models.char_bilstm_classifier import CharBiLSTMClassifier
 from src.models.charngram_bilstm_classifier import CharNgramBiLSTMClassifier
-from src.models.enhanced_char_bilstm import EnhancedCharBiLSTMClassifier
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test Arabic Diacritization Models")
     parser.add_argument(
         "--model",
-        choices=["bilstm_crf", "hierarchical_bilstm", "arabert_bilstm_crf", "arabert_char_bilstm_crf", "char_bilstm_classifier", "charngram_bilstm_classifier", "enhanced_char_bilstm"],
+        choices=["bilstm_crf", "hierarchical_bilstm", "arabert_bilstm_crf", "arabert_char_bilstm_crf", "char_bilstm_classifier", "charngram_bilstm_classifier"],
         required=True,
         help="Model name"
     )
@@ -785,7 +756,7 @@ if __name__ == "__main__":
     test_dataset = prepare_test_data(X_test, Y_test, lines_test, vocab, config, diacritic2id, embedder)
 
     # Create dataloader
-    batch_size = 4 if config.get("use_contextual", False) else DATA_CONFIG['batch_size']
+    batch_size = 1 if config.get("use_contextual", False) else DATA_CONFIG['batch_size']
     collate_fn = collate_contextual_batch if config.get("use_contextual", False) else None
 
     test_loader = DataLoader(

@@ -133,7 +133,9 @@ ARABERT_CHAR_BILSTM_CRF_CONFIG = {
     "gradient_clip": 5.0,
     "use_crf": True,
     "use_contextual": True,  # Uses AraBERT embeddings
-    "batch_size": 16  # Memory constraint with contextual embeddings
+    "batch_size": 32,  # Increased from 16 for better GPU utilization
+    "gradient_accumulation_steps": 2,  # Effective batch size = 64
+    "mixed_precision": True  # Enable AMP for faster training
 }
 
 # ======================================================
