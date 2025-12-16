@@ -20,6 +20,14 @@ import random
 from tqdm import tqdm
 from sklearn.metrics import accuracy_score
 import pickle
+import re
+
+# Diacritics pattern for removing diacritics
+DIACRITICS = re.compile(r'[\u064B-\u065F]')
+
+def remove_diacritics(text):
+    """Remove all diacritics from Arabic text"""
+    return DIACRITICS.sub('', text)
 
 # Set seeds for reproducibility
 def set_seed(seed=42):
@@ -56,10 +64,13 @@ class ContextualDataset(Dataset):
         line = self.lines[idx]
         y_seq = self.Y_encoded[idx]
         
-        # 1) Compute AraBERT embedding on-the-fly (per-character)
-        emb = self.embedder.embed_line_chars(line)  # (T, 768)
+        # Remove diacritics before processing (match competition conditions)
+        undiacritized_line = remove_diacritics(line)
         
-        # 2) Extract base characters using tokenize_line (consistent with test.py)
+        # 1) Compute AraBERT embedding on undiacritized text (competition-style)
+        emb = self.embedder.embed_line_chars(undiacritized_line)  # (T, 768)
+        
+        # 2) Extract base characters from original line for golden labels
         base_chars, _ = tokenize_line(line)
         char_ids = self.vocab.encode(base_chars)  # (T,)
         
@@ -143,6 +154,7 @@ from src.models.arabert_bilstm_crf import AraBERTBiLSTMCRF
 from src.models.arabert_char_bilstm_crf import AraBERTCharBiLSTMCRF
 from src.models.char_bilstm_classifier import CharBiLSTMClassifier
 from src.models.charngram_bilstm_classifier import CharNgramBiLSTMClassifier
+from src.validate_competition import validate_competition_style
 # TODO: Import other models when implemented
 # from src.models.rnn import RNNModel
 # from src.models.lstm import LSTMModel
@@ -436,11 +448,20 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
         config["embedding_dim"] = embedder.hidden_size
         print(f"✓ AraBERT loaded (hidden_size={embedder.hidden_size})")
 
-    # Build vocabulary from training data ONLY (no data leakage)
-    print("\nBuilding vocabulary...")
+    # Load pre-built Arabic vocabulary (36 letters + PAD + UNK = 38 total)
+    print("\nLoading vocabulary from utils/arabic_letters.pickle...")
+    with open("utils/arabic_letters.pickle", "rb") as f:
+        arabic_letters = pickle.load(f)
+    
     vocab = CharVocab()
-    vocab.build(X_train)
-    print(f"✓ Vocabulary size: {len(vocab.char2id)}")
+    # Add all Arabic letters to vocabulary (PAD and UNK already in char2id)
+    for letter in sorted(arabic_letters):
+        if letter not in vocab.char2id:
+            idx = len(vocab.char2id)
+            vocab.char2id[letter] = idx
+            vocab.id2char[idx] = letter
+    
+    print(f"✓ Vocabulary size: {len(vocab.char2id)} (36 Arabic letters + <PAD> + <UNK>)")
 
     # Update vocab size in config
     config = update_vocab_size(config.copy(), len(vocab.char2id))
@@ -465,8 +486,8 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
     val_dataset = prepare_data(X_val, Y_val, lines_val, vocab, config, diacritic2id, embedder, ngram_extractor)
 
     # Create dataloaders
-    # Note: batch_size should be reasonable when using contextual embeddings
-    batch_size = DATA_CONFIG['batch_size'] if not config.get("use_contextual", False) else 1
+    # Use batch_size from config (supports batching for contextual models now)
+    batch_size = config.get('batch_size', DATA_CONFIG['batch_size'])
     
     # Use custom collate function for contextual embeddings
     collate_fn = collate_contextual_batch if config.get("use_contextual", False) else None
@@ -583,8 +604,17 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
 
         avg_train_loss = train_loss / train_steps
 
-        # Validation
+        # Validation - Standard mode (fast)
         val_accuracy, val_der = evaluate_model(model, val_loader, device, diacritic2id, model_name)
+        
+        # Competition-style validation (every 5 epochs for accuracy check)
+        comp_accuracy, comp_der = None, None
+        if (epoch + 1) % 5 == 0 or epoch == 0:
+            print(f"  Running competition-style validation...")
+            comp_accuracy, comp_der = validate_competition_style(
+                model, lines_val, vocab, config, diacritic2id, embedder, device, model_name
+            )
+            print(f"  Competition DER: {comp_der:.4f} | Competition Accuracy: {comp_accuracy:.4f}")
 
         print(f"Epoch {epoch+1}/{config['num_epochs']} | Train Loss: {avg_train_loss:.4f} | Val Accuracy: {val_accuracy:.4f} | DER: {val_der:.4f}")
 
@@ -592,9 +622,10 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
         if scheduler:
             scheduler.step()
 
-        # Early stopping
-        if val_der < best_der:
-            best_der = val_der
+        # Early stopping (use competition DER if available, otherwise standard DER)
+        current_der = comp_der if comp_der is not None else val_der
+        if current_der < best_der:
+            best_der = current_der
             patience_counter = 0
             # Save complete checkpoint
             checkpoint = {
@@ -606,9 +637,25 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
                 'config': config,
                 'vocab': vocab.char2id
             }
+            
+            # Save best model
             torch.save(checkpoint, f"models/best_{model_name}.pth")
             print(f"  ✓ New best model! DER: {best_der:.4f} (saved at epoch {epoch+1})")
-        else:
+        
+        # Save checkpoint every epoch
+        epoch_checkpoint = {
+            'epoch': epoch + 1,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+            'val_der': val_der,
+            'val_accuracy': val_accuracy,
+            'config': config,
+            'vocab': vocab.char2id
+        }
+        torch.save(epoch_checkpoint, f"models/{model_name}_epoch_{epoch+1}.pth")
+        
+        if val_der > best_der:
             patience_counter += 1
             if patience_counter >= patience:
                 print(f"\n⚠ Early stopping triggered at epoch {epoch+1} (no improvement for {patience} epochs)")
@@ -626,7 +673,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Arabic Diacritization Models")
     parser.add_argument(
         "--model",
-        choices=["rnn", "lstm", "crf", "bilstm_crf", "hierarchical_bilstm", "arabert_bilstm_crf", "arabert_char_bilstm_crf", "char_bilstm_classifier", "charngram_bilstm_classifier"],
+        choices=["rnn", "lstm", "crf", "bilstm_crf", "hierarchical_bilstm", "arabert_bilstm_crf", "arabert_char_bilstm_crf", "superior_arabert_char_bilstm_crf", "char_bilstm_classifier", "charngram_bilstm_classifier"],
         default="bilstm_crf",
         help="Model to train"
     )

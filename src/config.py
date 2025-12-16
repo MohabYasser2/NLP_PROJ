@@ -133,7 +133,7 @@ ARABERT_CHAR_BILSTM_CRF_CONFIG = {
     "gradient_clip": 5.0,
     "use_crf": True,
     "use_contextual": True,  # Uses AraBERT embeddings
-    "batch_size": 4,  # 4x faster training with proper collation
+    "batch_size": 1,  # 4x faster training with proper collation
     "gradient_accumulation_steps": 3,  # Effective batch size: 12
     "mixed_precision": True  # AMP for additional speedup
 }

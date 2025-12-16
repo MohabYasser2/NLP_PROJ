@@ -131,7 +131,7 @@ def main():
     golden_file = r"C:\Users\mohab\Desktop\Uni\Courses\Year 5 -1st term\NLP\Project_new\texts.txt\msa\كتب حديثة\الأصول الثلاثة.txt"
     num_lines = 50
     model_name = "arabert_char_bilstm_crf"
-    model_path = r"models\best_arabert_char_bilstm_crf.pth"
+    model_path = r"models\best_arabert_char_bilstm_crf (6).pth"
     
     # Output files
     undiacritized_file = "sample/test_sample_undiacritized.txt"
