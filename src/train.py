@@ -821,12 +821,15 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
         }
         
         # Save with epoch number
-        torch.save(checkpoint, f"models/epoch_{epoch+1}_{model_name}.pth")
+        epoch_model_path = f"models/epoch_{epoch+1}_{model_name}.pth"
+        torch.save(checkpoint, epoch_model_path)
+        print(f"  💾 Checkpoint saved: {epoch_model_path}")
         
         # Also update best model if this is the best so far
         if should_evaluate and val_der == best_der:
-            torch.save(checkpoint, f"models/best_{model_name}.pth")
-            print(f"  💾 Best model updated: models/best_{model_name}.pth")
+            best_model_path = f"models/best_{model_name}.pth"
+            torch.save(checkpoint, best_model_path)
+            print(f"  💾 Best model updated: {best_model_path}")
 
     print("\n" + "="*70)
     print("✓ TRAINING COMPLETED!")

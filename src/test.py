@@ -465,8 +465,8 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--model_path",
-        required=True,
-        help="Path to the saved model checkpoint"
+        default="models/best_arabert_char_bilstm_crf.pth",
+        help="Path to the saved model checkpoint (default: models/best_arabert_char_bilstm_crf.pth)"
     )
     parser.add_argument(
         "--test_data",
