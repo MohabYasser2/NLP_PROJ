@@ -510,8 +510,9 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
     val_dataset = prepare_data(X_val, Y_val, lines_val, vocab, config, diacritic2id, embedder, ngram_extractor)
 
     # Create dataloaders
-    # Note: batch_size should be reasonable when using contextual embeddings
-    batch_size = DATA_CONFIG['batch_size'] if not config.get("use_contextual", False) else 1
+    # Use batch_size from model config (already optimized for GPU)
+    batch_size = config.get('batch_size', DATA_CONFIG['batch_size'])
+    print(f"Using batch size: {batch_size}")
     
     # Use custom collate function for contextual embeddings
     collate_fn = collate_contextual_batch if config.get("use_contextual", False) else None
@@ -576,17 +577,28 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
         )
     else:
         scheduler = None
+    
+    # Mixed precision training setup
+    use_amp = config.get('mixed_precision', False) and device.type == 'cuda'
+    scaler = torch.cuda.amp.GradScaler() if use_amp else None
+    if use_amp:
+        print("✓ Mixed precision training enabled (AMP)")
 
     # Training loop
     best_der = float('inf')
     patience = config["patience"]
     patience_counter = 0
     
+    # Gradient accumulation
+    accumulation_steps = config.get('gradient_accumulation_steps', 1)
+    effective_batch_size = batch_size * accumulation_steps
+    
     # Print speed optimization summary
     print("\n" + "="*70)
     print("SPEED OPTIMIZATIONS ENABLED")
     print("="*70)
-    print(f"✓ Batch size: {config.get('batch_size', 'default')}")
+    print(f"✓ Batch size: {batch_size} x {accumulation_steps} accumulation = {effective_batch_size} effective")
+    print(f"✓ Mixed precision (AMP): {'Enabled' if use_amp else 'Disabled'}")
     if config.get("use_contextual", False):
         print(f"✓ Pre-computed training embeddings: {len(train_dataset)} samples")
         print(f"✓ Cached validation embeddings: {len(val_embeddings_cache) if val_embeddings_cache else 0} samples")
@@ -598,6 +610,7 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
         print(f"✓ Validation subset: {validation_sample_size}/{len(lines_val)} samples ({validation_sample_size/len(lines_val)*100:.1f}%)")
     print(f"✓ Evaluation starts at epoch: {eval_start_epoch}")
     print(f"✓ Checkpoint saving: Every epoch + best model")
+    print(f"✓ Total iterations per epoch: {len(train_loader)} batches")
     print("="*70 + "\n")
     
     # Check model type for appropriate handling
@@ -612,7 +625,7 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
         train_steps = 0
 
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config['num_epochs']}")
-        for batch in progress_bar:
+        for batch_idx, batch in enumerate(progress_bar):
             if is_fusion_model:
                 # Fusion model: unpack 4 tensors (embedding, char_ids, labels, mask)
                 X_batch, char_ids_batch, y_batch, mask_batch = batch
@@ -621,10 +634,28 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
                 y_batch = y_batch.to(device)
                 mask_batch = mask_batch.to(device)
 
-                optimizer.zero_grad()
+                # Forward pass with mixed precision
+                with torch.cuda.amp.autocast(enabled=use_amp):
+                    loss = model(X_batch, char_ids_batch, tags=y_batch, mask=mask_batch)
+                    loss = loss / accumulation_steps  # Scale loss for gradient accumulation
 
-                # Forward pass with dual inputs
-                loss = model(X_batch, char_ids_batch, tags=y_batch, mask=mask_batch)
+                # Backward pass with gradient scaling
+                if scaler is not None:
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
+                
+                # Gradient accumulation: only step optimizer every N batches
+                if (batch_idx + 1) % accumulation_steps == 0:
+                    if scaler is not None:
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), config["gradient_clip"])
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), config["gradient_clip"])
+                        optimizer.step()
+                    optimizer.zero_grad()
             elif is_ngram_classifier:
                 # N-gram classifier: unpack 4 tensors (char_ids, ngram_ids, labels, mask)
                 char_ids_batch, ngram_ids_batch, y_batch, mask_batch = batch
@@ -633,10 +664,28 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
                 y_batch = y_batch.to(device)
                 mask_batch = mask_batch.to(device)
 
-                optimizer.zero_grad()
+                # Forward pass with mixed precision
+                with torch.cuda.amp.autocast(enabled=use_amp):
+                    _, loss = model(char_ids_batch, ngram_ids_batch, tags=y_batch, mask=mask_batch)
+                    loss = loss / accumulation_steps
 
-                # Forward pass with char and ngram inputs
-                _, loss = model(char_ids_batch, ngram_ids_batch, tags=y_batch, mask=mask_batch)
+                # Backward pass
+                if scaler is not None:
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
+                
+                # Gradient accumulation
+                if (batch_idx + 1) % accumulation_steps == 0:
+                    if scaler is not None:
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), config["gradient_clip"])
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), config["gradient_clip"])
+                        optimizer.step()
+                    optimizer.zero_grad()
             elif is_simple_classifier:
                 # Simple classifier: unpack 3 tensors (char_ids, labels, mask)
                 X_batch, y_batch, mask_batch = batch
@@ -644,10 +693,28 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
                 y_batch = y_batch.to(device)
                 mask_batch = mask_batch.to(device)
 
-                optimizer.zero_grad()
+                # Forward pass with mixed precision
+                with torch.cuda.amp.autocast(enabled=use_amp):
+                    _, loss = model(X_batch, tags=y_batch, mask=mask_batch)
+                    loss = loss / accumulation_steps
 
-                # Forward pass returns (logits, loss)
-                _, loss = model(X_batch, tags=y_batch, mask=mask_batch)
+                # Backward pass
+                if scaler is not None:
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
+                
+                # Gradient accumulation
+                if (batch_idx + 1) % accumulation_steps == 0:
+                    if scaler is not None:
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), config["gradient_clip"])
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), config["gradient_clip"])
+                        optimizer.step()
+                    optimizer.zero_grad()
             else:
                 # Standard CRF model: unpack 3 tensors (X, y, mask)
                 X_batch, y_batch, mask_batch = batch
@@ -655,22 +722,33 @@ def train_model(model_name, train_path, val_path, max_samples=None, seed=42):
                 y_batch = y_batch.to(device)
                 mask_batch = mask_batch.to(device)
 
-                optimizer.zero_grad()
+                # Forward pass with mixed precision
+                with torch.cuda.amp.autocast(enabled=use_amp):
+                    loss = model(X_batch, tags=y_batch, mask=mask_batch)
+                    loss = loss / accumulation_steps
 
-                # Forward pass with single input
-                loss = model(X_batch, tags=y_batch, mask=mask_batch)
+                # Backward pass
+                if scaler is not None:
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
+                
+                # Gradient accumulation
+                if (batch_idx + 1) % accumulation_steps == 0:
+                    if scaler is not None:
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), config["gradient_clip"])
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), config["gradient_clip"])
+                        optimizer.step()
+                    optimizer.zero_grad()
             
-            loss.backward()
-
-            # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(model.parameters(), config["gradient_clip"])
-
-            optimizer.step()
-
-            train_loss += loss.item()
+            train_loss += loss.item() * accumulation_steps  # Rescale for logging
             train_steps += 1
 
-            progress_bar.set_postfix({"loss": f"{loss.item():.4f}"})
+            progress_bar.set_postfix({"loss": f"{loss.item() * accumulation_steps:.4f}"})
 
         avg_train_loss = train_loss / train_steps
 
