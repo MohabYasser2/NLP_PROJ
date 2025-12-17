@@ -133,5 +133,6 @@ class AraBERTCharBiLSTMCRF(nn.Module):
             emissions_t = emissions.transpose(0, 1)  # (seq, batch, tags)
             mask_t = mask.transpose(0, 1) if mask is not None else None  # (seq, batch)
             
-            predictions = self.crf.viterbi_decode(emissions_t, mask=mask_t)
+            # TorchCRF uses .decode() method for Viterbi decoding
+            predictions = self.crf.decode(emissions_t, mask=mask_t)
             return predictions

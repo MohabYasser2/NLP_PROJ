@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Arabic Diacritization Terminal</title>
+    <style>
+      body {
+        background-color: #000;
+        color: #00ff00;
+        font-family: "Courier New", Courier, monospace;
+        margin: 0;
+        padding: 20px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        min-height: 100vh;
+      }
+
+      .container {
+        width: 80%;
+        max-width: 800px;
+        border: 2px solid #00ff00;
+        padding: 20px;
+        box-shadow: 0 0 10px #00ff00;
+        background-color: #0a0a0a;
+      }
+
+      h1 {
+        text-align: center;
+        text-transform: uppercase;
+        border-bottom: 1px dashed #00ff00;
+        padding-bottom: 10px;
+        margin-top: 0;
+        text-shadow: 0 0 5px #00ff00;
+      }
+
+      .input-group {
+        margin-top: 20px;
+        display: flex;
+        flex-direction: column;
+      }
+
+      label {
+        margin-bottom: 10px;
+        font-weight: bold;
+      }
+
+      textarea {
+        background-color: #000;
+        color: #00ff00;
+        border: 1px solid #00ff00;
+        padding: 10px;
+        font-family: "Courier New", Courier, monospace;
+        font-size: 18px;
+        resize: vertical;
+        min-height: 100px;
+        outline: none;
+        direction: rtl;
+      }
+
+      textarea:focus {
+        box-shadow: 0 0 5px #00ff00;
+      }
+
+      button {
+        margin-top: 15px;
+        background-color: #000;
+        color: #00ff00;
+        border: 1px solid #00ff00;
+        padding: 10px 20px;
+        font-family: "Courier New", Courier, monospace;
+        font-size: 16px;
+        cursor: pointer;
+        transition: all 0.3s;
+        text-transform: uppercase;
+        font-weight: bold;
+        align-self: flex-end;
+      }
+
+      button:hover {
+        background-color: #00ff00;
+        color: #000;
+        box-shadow: 0 0 10px #00ff00;
+      }
+
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .output-area {
+        margin-top: 30px;
+        border-top: 1px dashed #00ff00;
+        padding-top: 20px;
+      }
+
+      .output-label {
+        margin-bottom: 10px;
+        font-weight: bold;
+        display: block;
+      }
+
+      #output {
+        white-space: pre-wrap;
+        font-size: 20px;
+        line-height: 1.6;
+        direction: rtl;
+        min-height: 50px;
+      }
+
+      .cursor {
+        display: inline-block;
+        width: 10px;
+        height: 20px;
+        background-color: #00ff00;
+        animation: blink 1s step-end infinite;
+        vertical-align: middle;
+      }
+
+      @keyframes blink {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0;
+        }
+      }
+
+      .loading {
+        display: none;
+      }
+
+      .loading::after {
+        content: "PROCESSING...";
+        animation: blink 1s step-end infinite;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Arabic Diacritization Terminal</h1>
+
+      <div class="input-group">
+        <label for="inputText">> ENTER ARABIC TEXT:</label>
+        <textarea
+          id="inputText"
+          placeholder="أدخل النص العربي هنا..."
+        ></textarea>
+        <button id="runBtn" onclick="diacritize()">RUN_EXECUTE</button>
+      </div>
+
+      <div class="output-area">
+        <span class="output-label">> SYSTEM OUTPUT:</span>
+        <div id="output"></div>
+        <div id="loading" class="loading"></div>
+      </div>
+    </div>
+
+    <script>
+      async function diacritize() {
+        const inputText = document.getElementById("inputText").value;
+        const outputDiv = document.getElementById("output");
+        const loadingDiv = document.getElementById("loading");
+        const runBtn = document.getElementById("runBtn");
+
+        if (!inputText.trim()) return;
+
+        // UI State
+        outputDiv.textContent = "";
+        loadingDiv.style.display = "block";
+        runBtn.disabled = true;
+
+        try {
+          const response = await fetch("http://localhost:8000/diacritize", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ text: inputText }),
+          });
+
+          if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+          }
+
+          const data = await response.json();
+
+          // Typewriter effect
+          loadingDiv.style.display = "none";
+          typeWriter(data.diacritized_text, outputDiv);
+        } catch (error) {
+          console.error("Error:", error);
+          loadingDiv.style.display = "none";
+          outputDiv.textContent = `ERROR: ${error.message}`;
+          outputDiv.style.color = "red";
+        } finally {
+          runBtn.disabled = false;
+        }
+      }
+
+      function typeWriter(text, element) {
+        let i = 0;
+        element.textContent = "";
+        const cursor = document.createElement("span");
+        cursor.className = "cursor";
+        element.appendChild(cursor);
+
+        function type() {
+          if (i < text.length) {
+            // Insert before cursor
+            element.insertBefore(
+              document.createTextNode(text.charAt(i)),
+              cursor
+            );
+            i++;
+            setTimeout(type, 20); // Typing speed
+          }
+        }
+        type();
+      }
+    </script>
+  </body>
+</html>
