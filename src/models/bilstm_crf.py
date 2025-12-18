@@ -62,5 +62,5 @@ class BiLSTMCRF(nn.Module):
             mask_transposed = mask.transpose(0, 1) if mask is not None else None  # (batch, seq) -> (seq, batch)
 
             # CRF returns list of predictions for each sequence in batch
-            predictions = self.crf.viterbi_decode(emissions_transposed, mask=mask_transposed)
+            predictions = self.crf.decode(emissions_transposed, mask=mask_transposed)
             return predictions

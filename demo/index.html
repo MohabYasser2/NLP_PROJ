@@ -46,6 +46,28 @@
         font-weight: bold;
       }
 
+      select {
+        background-color: #000;
+        color: #00ff00;
+        border: 1px solid #00ff00;
+        padding: 10px;
+        font-family: "Courier New", Courier, monospace;
+        font-size: 16px;
+        outline: none;
+        margin-bottom: 20px;
+        cursor: pointer;
+      }
+
+      select:focus {
+        box-shadow: 0 0 5px #00ff00;
+      }
+
+      select option,
+      select optgroup {
+        background-color: #000;
+        color: #00ff00;
+      }
+
       textarea {
         background-color: #000;
         color: #00ff00;
@@ -143,6 +165,11 @@
       <h1>Arabic Diacritization Terminal</h1>
 
       <div class="input-group">
+        <label for="modelSelect">> SELECT MODEL:</label>
+        <select id="modelSelect">
+          <option value="">Loading models...</option>
+        </select>
+        
         <label for="inputText">> ENTER ARABIC TEXT:</label>
         <textarea
           id="inputText"
@@ -159,13 +186,67 @@
     </div>
 
     <script>
+      // Load available models on page load
+      async function loadModels() {
+        try {
+          const response = await fetch("http://localhost:8001/models");
+          const data = await response.json();
+          
+          const select = document.getElementById("modelSelect");
+          select.innerHTML = ""; // Clear loading message
+          
+          // Group models by type
+          const modelsByType = {};
+          data.models.forEach(model => {
+            if (!modelsByType[model.type]) {
+              modelsByType[model.type] = [];
+            }
+            modelsByType[model.type].push(model);
+          });
+          
+          // Add options grouped by type
+          for (const [type, models] of Object.entries(modelsByType)) {
+            const optgroup = document.createElement("optgroup");
+            optgroup.label = type.replace(/_/g, " ").toUpperCase();
+            
+            models.forEach(model => {
+              const option = document.createElement("option");
+              option.value = model.filename;
+              option.textContent = model.display_name;
+              
+              // Select default model
+              if (model.filename === "best_arabert_char_bilstm_crf.pth") {
+                option.selected = true;
+              }
+              
+              optgroup.appendChild(option);
+            });
+            
+            select.appendChild(optgroup);
+          }
+        } catch (error) {
+          console.error("Error loading models:", error);
+          document.getElementById("modelSelect").innerHTML = 
+            '<option value="">Error loading models</option>';
+        }
+      }
+      
+      // Load models when page loads
+      window.addEventListener("DOMContentLoaded", loadModels);
+      
       async function diacritize() {
         const inputText = document.getElementById("inputText").value;
+        const modelName = document.getElementById("modelSelect").value;
         const outputDiv = document.getElementById("output");
         const loadingDiv = document.getElementById("loading");
         const runBtn = document.getElementById("runBtn");
 
         if (!inputText.trim()) return;
+        if (!modelName) {
+          outputDiv.textContent = "ERROR: Please select a model";
+          outputDiv.style.color = "red";
+          return;
+        }
 
         // UI State
         outputDiv.textContent = "";
@@ -173,12 +254,15 @@
         runBtn.disabled = true;
 
         try {
-          const response = await fetch("http://localhost:8000/diacritize", {
+          const response = await fetch("http://localhost:8001/diacritize", {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
             },
-            body: JSON.stringify({ text: inputText }),
+            body: JSON.stringify({ 
+              text: inputText,
+              model_name: modelName 
+            }),
           });
 
           if (!response.ok) {

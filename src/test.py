@@ -275,7 +275,7 @@ def get_model(model_name, config):
             "dropout": config["dropout"],
             "freeze_arabert": config.get("freeze_arabert", True)
         }
-        model = AraBERTBiLSTMCRF(**model_config)
+        # model = AraBERTBiLSTMCRF(**model_config)
     elif model_name.lower() == "arabert_char_bilstm_crf":
         # AraBERT + Character Fusion model (SOTA)
         model_config = {
@@ -450,7 +450,7 @@ from src.features.contextual_embeddings import ContextualEmbedder
 
 # Import models
 from src.models.bilstm_crf import BiLSTMCRF
-from src.models.arabert_bilstm_crf import AraBERTBiLSTMCRF
+# from src.models.arabert_bilstm_crf import AraBERTBiLSTMCRF
 from src.models.arabert_char_bilstm_crf import AraBERTCharBiLSTMCRF
 from src.models.char_bilstm_classifier import CharBiLSTMClassifier
 from src.models.charngram_bilstm_classifier import CharNgramBiLSTMClassifier
